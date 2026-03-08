@@ -1,0 +1,149 @@
+import { prisma } from '../utils/database.js';
+import { ensureUserId, hashPassword } from '../utils/demo-data.js';
+
+interface RegisterParams {
+  email: string;
+  password: string;
+  name: string;
+  organization?: string;
+  title?: string;
+}
+
+interface LoginParams {
+  email: string;
+  password: string;
+}
+
+interface UpdateProfileParams {
+  name?: string;
+  organization?: string;
+  title?: string;
+  avatar?: string;
+  bio?: string;
+  expertise?: string[];
+}
+
+export class UserService {
+  async register(params: RegisterParams) {
+    const user = await prisma.user.create({
+      data: {
+        email: params.email,
+        passwordHash: hashPassword(params.password),
+        name: params.name,
+        organization: params.organization,
+        title: params.title,
+        expertise: [],
+      },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        organization: true,
+        title: true,
+        createdAt: true,
+      },
+    });
+
+    return {
+      user,
+      token: `dev-token-${user.id}`,
+    };
+  }
+
+  async login(params: LoginParams) {
+    const user = await prisma.user.findUnique({
+      where: { email: params.email },
+    });
+
+    if (!user || user.passwordHash !== hashPassword(params.password)) {
+      throw new Error('邮箱或密码错误');
+    }
+
+    return {
+      token: `dev-token-${user.id}`,
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        avatar: user.avatar,
+        organization: user.organization,
+        title: user.title,
+      },
+    };
+  }
+
+  async getUserById(userId?: string) {
+    const resolvedUserId = await ensureUserId(userId);
+    return prisma.user.findUnique({
+      where: { id: resolvedUserId },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        avatar: true,
+        organization: true,
+        title: true,
+        bio: true,
+        expertise: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    });
+  }
+
+  async updateProfile(userId: string | undefined, data: UpdateProfileParams) {
+    const resolvedUserId = await ensureUserId(userId);
+    return prisma.user.update({
+      where: { id: resolvedUserId },
+      data,
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        avatar: true,
+        organization: true,
+        title: true,
+        bio: true,
+        expertise: true,
+        updatedAt: true,
+      },
+    });
+  }
+
+  async getPublicProfile(id: string) {
+    return prisma.user.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        name: true,
+        avatar: true,
+        organization: true,
+        title: true,
+        bio: true,
+        expertise: true,
+        createdAt: true,
+      },
+    });
+  }
+
+  async getUserSkills(id: string) {
+    return prisma.skill.findMany({
+      where: { authorId: id },
+      orderBy: { createdAt: 'desc' },
+      take: 50,
+    });
+  }
+
+  async getUserProjects(id: string) {
+    return prisma.project.findMany({
+      where: {
+        OR: [
+          { ownerId: id },
+          { members: { some: { userId: id } } },
+        ],
+      },
+      orderBy: { updatedAt: 'desc' },
+      take: 50,
+    });
+  }
+}

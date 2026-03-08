@@ -1,0 +1,133 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --foreground-rgb: 255, 255, 255;
+  --background-start-rgb: 15, 23, 42;
+  --background-end-rgb: 30, 41, 59;
+}
+
+body {
+  color: rgb(var(--foreground-rgb));
+  background: linear-gradient(
+      to bottom,
+      transparent,
+      rgb(var(--background-end-rgb))
+    )
+    rgb(var(--background-start-rgb));
+}
+
+/* 自定义滚动条 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #1e293b;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #475569;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #64748b;
+}
+
+/* 代码块样式 */
+pre {
+  background-color: #1e293b;
+  border-radius: 0.5rem;
+  padding: 1rem;
+  overflow-x: auto;
+}
+
+code {
+  font-family: 'Fira Code', 'Monaco', monospace;
+}
+
+/* Markdown 样式 */
+.markdown {
+  @apply text-slate-200;
+}
+
+.markdown h1 {
+  @apply text-2xl font-bold mb-4 text-white;
+}
+
+.markdown h2 {
+  @apply text-xl font-bold mb-3 text-white;
+}
+
+.markdown h3 {
+  @apply text-lg font-bold mb-2 text-white;
+}
+
+.markdown p {
+  @apply mb-4 leading-relaxed;
+}
+
+.markdown ul {
+  @apply list-disc list-inside mb-4;
+}
+
+.markdown ol {
+  @apply list-decimal list-inside mb-4;
+}
+
+.markdown table {
+  @apply w-full border-collapse mb-4;
+}
+
+.markdown th {
+  @apply bg-slate-700 text-white p-2 border border-slate-600;
+}
+
+.markdown td {
+  @apply p-2 border border-slate-600;
+}
+
+/* 动画 */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.3s ease-out;
+}
+
+/* 3D 模型查看器 */
+.model-viewer {
+  width: 100%;
+  height: 500px;
+  background-color: #0f172a;
+  border-radius: 0.5rem;
+}
+
+/* 分析结果图表 */
+.chart-container {
+  @apply bg-slate-800 rounded-lg p-4;
+}
+
+/* 聊天界面 */
+.chat-message {
+  @apply p-4 rounded-lg mb-4;
+}
+
+.chat-message.user {
+  @apply bg-blue-600 ml-12;
+}
+
+.chat-message.assistant {
+  @apply bg-slate-700 mr-12;
+}
