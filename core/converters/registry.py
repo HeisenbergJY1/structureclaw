@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Dict, List
 
 from converters.base import FormatConverter
+from converters.compact_v1_converter import CompactV1Converter
 from converters.simple_v1_converter import SimpleV1Converter
 from converters.v1_converter import StructureModelV1Converter
 
@@ -10,6 +11,7 @@ from converters.v1_converter import StructureModelV1Converter
 _CONVERTERS: Dict[str, FormatConverter] = {
     StructureModelV1Converter.format_name: StructureModelV1Converter(),
     SimpleV1Converter.format_name: SimpleV1Converter(),
+    CompactV1Converter.format_name: CompactV1Converter(),
 }
 
 

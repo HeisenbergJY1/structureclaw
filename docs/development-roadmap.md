@@ -63,7 +63,7 @@
   - `GET /schema/structure-model-v1`
   - `GET /schema/converters`（查询已支持转换格式）
   - `POST /validate`
-  - `POST /convert`（支持 `structuremodel-v1` 与 `simple-1` 的导入/导出，目标版本当前 `1.0.0`）
+  - `POST /convert`（支持 `structuremodel-v1`、`simple-1`、`compact-1` 的导入/导出，目标版本当前 `1.0.0`）
 - 现有数据模型雏形：`Node/Element/Material/Section/StructuralModel`
 
 ### 2.4 前端

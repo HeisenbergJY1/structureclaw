@@ -262,7 +262,7 @@ NEXT_PUBLIC_API_URL=http://localhost:8000
 - `GET /api/v1/agent/tools`
 - `POST /api/v1/chat/execute`
 - `POST /api/v1/chat/stream` (`mode=chat|execute|auto`)
-- `agent/run` 已支持最小文本草模（梁/桁架）与缺参澄清返回
+- `agent/run` 已支持最小文本草模（梁/双跨梁/平面桁架/门式刚架）与会话级缺参澄清补数
 - `GET /api/v1/users/*`
 - `GET /api/v1/projects/*`
 - `GET /api/v1/skills/*`
@@ -274,6 +274,8 @@ NEXT_PUBLIC_API_URL=http://localhost:8000
 - `GET /`
 - `GET /health`
 - `GET /schema/converters`
+- `POST /convert`（支持 `structuremodel-v1`、`simple-1`、`compact-1`）
+- `POST /validate`
 - `POST /analyze`
 - `POST /code-check`
 - `POST /design/beam`
