@@ -74,9 +74,9 @@ Frontend rewrite requirements, all implemented in v1.
 ### Accessibility
 
 - [x] **ACCS-01**: Keyboard navigation support (Tab, Enter, Escape)
-- [ ] **ACCS-02**: Focus management
+- [x] **ACCS-02**: Focus management
 - [ ] **ACCS-03**: Semantic HTML
-- [ ] **ACCS-04**: ARIA labels
+- [x] **ACCS-04**: ARIA labels
 
 ## v2 Requirements
 
@@ -156,9 +156,9 @@ Which phase covers which requirement. Updated during roadmap creation.
 | PAGE-01 | Phase 6 | Complete |
 | PAGE-02 | Phase 6 | Pending |
 | ACCS-01 | Phase 6 | Complete |
-| ACCS-02 | Phase 6 | Pending |
+| ACCS-02 | Phase 6 | Complete |
 | ACCS-03 | Phase 6 | Pending |
-| ACCS-04 | Phase 6 | Pending |
+| ACCS-04 | Phase 6 | Complete |
 
 **Coverage:**
 - v1 requirements: 47 total

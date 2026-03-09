@@ -17,7 +17,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 3: Layout System** - Create responsive app shell with sidebar and header
 - [x] **Phase 4: State & API Layer** - Implement Zustand stores and API client with SSE support (completed 2026-03-09)
 - [x] **Phase 5: Console Feature** - Rebuild the core console with all existing functionality (completed 2026-03-09)
-- [ ] **Phase 6: Pages & Accessibility** - Compose pages and validate keyboard/ARIA support
+- [x] **Phase 6: Pages & Accessibility** - Compose pages and validate keyboard/ARIA support (completed 2026-03-09)
 
 ## Phase Details
 
@@ -149,7 +149,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | 3. Layout System | 3/3 | Complete | 2026-03-09 |
 | 4. State & API Layer | 3/3 | Complete    | 2026-03-09 |
 | 5. Console Feature | 6/7 | Complete    | 2026-03-09 |
-| 6. Pages & Accessibility | 2/4 | In progress | - |
+| 6. Pages & Accessibility | 5/5 | Complete   | 2026-03-09 |
 
 ---
 *Roadmap created: 2026-03-09*
