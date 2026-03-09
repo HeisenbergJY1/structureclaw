@@ -96,3 +96,31 @@
     font-feature-settings: "rlig" 1, "calt" 1;
   }
 }
+
+/* Glassmorphism utilities */
+@layer components {
+  .glass {
+    @apply backdrop-blur-lg bg-background/80 border border-border/50;
+  }
+
+  .glass-subtle {
+    @apply backdrop-blur-md bg-background/60 border border-border/30;
+  }
+
+  .glass-strong {
+    @apply backdrop-blur-xl bg-background/90 border border-border/70;
+  }
+
+  /* Dark mode glassmorphism adjustments */
+  .dark .glass {
+    @apply bg-background/70;
+  }
+
+  .dark .glass-subtle {
+    @apply bg-background/50;
+  }
+
+  .dark .glass-strong {
+    @apply bg-background/80;
+  }
+}
