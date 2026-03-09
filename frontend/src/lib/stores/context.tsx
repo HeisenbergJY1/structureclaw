@@ -8,9 +8,14 @@ import {
   type ConsoleSlice,
   initialConsoleState,
 } from './slices/console'
+import {
+  createPreferencesSlice,
+  type PreferencesSlice,
+  initialPreferencesState,
+} from './slices/preferences'
 
 // Combine all slice types here
-export type StoreState = ConsoleSlice
+export type StoreState = ConsoleSlice & PreferencesSlice
 
 /**
  * Initialize the store with default state values.
@@ -20,6 +25,7 @@ export type StoreState = ConsoleSlice
 export const initStore = (): Partial<StoreState> => {
   return {
     ...initialConsoleState,
+    ...initialPreferencesState,
   }
 }
 
@@ -31,6 +37,7 @@ export const initStore = (): Partial<StoreState> => {
 export const createAppStore = (initState?: Partial<StoreState>) => {
   return createStore<StoreState>()((set, get, store) => ({
     ...createConsoleSlice(set, get, store),
+    ...createPreferencesSlice(set, get, store),
     // Override with any provided initial state values
     ...(initState || {}),
   }))
