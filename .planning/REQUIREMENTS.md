@@ -67,7 +67,7 @@ Frontend rewrite requirements, all implemented in v1.
 ### State & Data
 
 - [ ] **STAT-01**: Zustand store factory pattern (SSR compatible)
-- [ ] **STAT-02**: API client layer (fetch wrapper)
+- [x] **STAT-02**: API client layer (fetch wrapper)
 - [ ] **STAT-03**: SSE streaming hook
 - [ ] **STAT-04**: Theme state management
 
@@ -133,7 +133,7 @@ Which phase covers which requirement. Updated during roadmap creation.
 | LAYT-04 | Phase 3 | Complete |
 | LAYT-05 | Phase 3 | Complete |
 | STAT-01 | Phase 4 | Pending |
-| STAT-02 | Phase 4 | Pending |
+| STAT-02 | Phase 4 | Complete |
 | STAT-03 | Phase 4 | Pending |
 | STAT-04 | Phase 4 | Pending |
 | CONS-01 | Phase 5 | Pending |
