@@ -4,6 +4,7 @@ import { MetricsGrid } from './metrics-grid'
 import { Timeline } from '../timeline'
 import { ReportSummary } from '../report-summary'
 import type { AgentResult } from '@/lib/stores/slices/console'
+import type { AgentToolCall as TimelineToolCall } from '../timeline/timeline-item'
 
 export interface ResultDisplayProps {
   result: AgentResult | null
@@ -13,6 +14,15 @@ export interface ResultDisplayProps {
  * ResultDisplay is the main container that composes all result components
  */
 export function ResultDisplay({ result }: ResultDisplayProps) {
+  // Convert AgentToolCall from API to TimelineToolCall format
+  const timelineCalls: TimelineToolCall[] = result?.toolCalls?.map(call => ({
+    tool: call.name || call.tool || 'unknown',
+    status: call.status,
+    durationMs: call.durationMs,
+    errorCode: call.errorCode,
+    error: call.error,
+  })) || []
+
   return (
     <Card>
       <CardHeader>
@@ -47,21 +57,17 @@ export function ResultDisplay({ result }: ResultDisplayProps) {
           <div>
             <h3 className="text-sm font-medium mb-2">Plan</h3>
             <ul className="list-disc list-inside text-sm space-y-1">
-              {result.plan.map((item, idx) => (
+              {result.plan.map((item: string, idx: number) => (
                 <li key={`plan-${idx}`}>{item}</li>
               ))}
             </ul>
           </div>
         )}
 
-        {result?.toolCalls && result.toolCalls.length > 0 && (
+        {timelineCalls.length > 0 && (
           <div>
             <h3 className="text-sm font-medium mb-2">Execution Timeline</h3>
-            <Timeline calls={result.toolCalls.map(call => ({
-              tool: call.name || 'unknown',
-              status: call.result ? 'success' : 'error',
-              durationMs: 0,
-            }))} />
+            <Timeline calls={timelineCalls} />
           </div>
         )}
 
@@ -69,7 +75,7 @@ export function ResultDisplay({ result }: ResultDisplayProps) {
           <div>
             <h3 className="text-sm font-medium mb-2">Artifacts</h3>
             <ul className="list-disc list-inside text-sm space-y-1">
-              {result.artifacts.map((artifact, idx) => (
+              {result.artifacts.map((artifact, idx: number) => (
                 <li key={`artifact-${idx}`}>
                   {artifact.format}: {artifact.path}
                 </li>
@@ -78,8 +84,8 @@ export function ResultDisplay({ result }: ResultDisplayProps) {
           </div>
         )}
 
-        {result?.data?.report && (
-          <ReportSummary report={result.data.report as { summary?: string; markdown?: string }} />
+        {result?.report && (
+          <ReportSummary report={result.report} />
         )}
       </CardContent>
     </Card>
