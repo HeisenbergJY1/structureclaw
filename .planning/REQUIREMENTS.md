@@ -19,17 +19,17 @@ Frontend rewrite requirements, all implemented in v1.
 
 ### Components
 
-- [ ] **COMP-01**: Button component (multiple sizes, multiple variants)
-- [ ] **COMP-02**: Card component
-- [ ] **COMP-03**: Input component
-- [ ] **COMP-04**: Textarea component
-- [ ] **COMP-05**: Select component
-- [ ] **COMP-06**: Dialog/Modal component
-- [ ] **COMP-07**: Toast notification component (Sonner)
-- [ ] **COMP-08**: Skeleton loading component
-- [ ] **COMP-09**: Badge component
-- [ ] **COMP-10**: Command Palette (Cmd/Ctrl+K)
-- [ ] **COMP-11**: Micro-interaction animations (hover, click, transition)
+- [x] **COMP-01**: Button component (multiple sizes, multiple variants)
+- [x] **COMP-02**: Card component
+- [x] **COMP-03**: Input component
+- [x] **COMP-04**: Textarea component
+- [x] **COMP-05**: Select component
+- [x] **COMP-06**: Dialog/Modal component
+- [x] **COMP-07**: Toast notification component (Sonner)
+- [x] **COMP-08**: Skeleton loading component
+- [x] **COMP-09**: Badge component
+- [x] **COMP-10**: Command Palette (Cmd/Ctrl+K)
+- [x] **COMP-11**: Micro-interaction animations (hover, click, transition)
 
 ### Layout
 
@@ -116,17 +116,17 @@ Which phase covers which requirement. Updated during roadmap creation.
 | DSGN-05 | Phase 1 | Complete |
 | DSGN-06 | Phase 1 | Complete |
 | DSGN-07 | Phase 1 | Complete |
-| COMP-01 | Phase 2 | Pending |
-| COMP-02 | Phase 2 | Pending |
-| COMP-03 | Phase 2 | Pending |
-| COMP-04 | Phase 2 | Pending |
-| COMP-05 | Phase 2 | Pending |
-| COMP-06 | Phase 2 | Pending |
-| COMP-07 | Phase 2 | Pending |
-| COMP-08 | Phase 2 | Pending |
-| COMP-09 | Phase 2 | Pending |
-| COMP-10 | Phase 2 | Pending |
-| COMP-11 | Phase 2 | Pending |
+| COMP-01 | Phase 2 | Complete |
+| COMP-02 | Phase 2 | Complete |
+| COMP-03 | Phase 2 | Complete |
+| COMP-04 | Phase 2 | Complete |
+| COMP-05 | Phase 2 | Complete |
+| COMP-06 | Phase 2 | Complete |
+| COMP-07 | Phase 2 | Complete |
+| COMP-08 | Phase 2 | Complete |
+| COMP-09 | Phase 2 | Complete |
+| COMP-10 | Phase 2 | Complete |
+| COMP-11 | Phase 2 | Complete |
 | LAYT-01 | Phase 3 | Pending |
 | LAYT-02 | Phase 3 | Pending |
 | LAYT-03 | Phase 3 | Pending |
