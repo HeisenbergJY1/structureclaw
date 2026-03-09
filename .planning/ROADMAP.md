@@ -12,7 +12,7 @@ This roadmap transforms StructureClaw from a debug-style interface into a polish
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Design System Foundation** - Establish visual language with tokens, fonts, and theme support
+- [x] **Phase 1: Design System Foundation** - Establish visual language with tokens, fonts, and theme support
 - [ ] **Phase 2: Component Library** - Build reusable UI primitives with shadcn/ui patterns
 - [ ] **Phase 3: Layout System** - Create responsive app shell with sidebar and header
 - [ ] **Phase 4: State & API Layer** - Implement Zustand stores and API client with SSE support
@@ -34,12 +34,12 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Plans**: 6 plans in 3 waves
 
 Plans:
-- [ ] 01-00: Wave 0 - Vitest test infrastructure and test stubs
-- [ ] 01-01: Design tokens and CSS variables (DSGN-01, DSGN-03)
-- [ ] 01-02: Geist font configuration (DSGN-02)
-- [ ] 01-03: cn() utility verification and tests (DSGN-04)
-- [ ] 01-04: Theme provider with tri-state support (DSGN-05)
-- [ ] 01-05: Accent color and glassmorphism utilities (DSGN-06, DSGN-07)
+- [x] 01-00: Wave 0 - Vitest test infrastructure and test stubs
+- [x] 01-01: Design tokens and CSS variables (DSGN-01, DSGN-03)
+- [x] 01-02: Geist font configuration (DSGN-02)
+- [x] 01-03: cn() utility verification and tests (DSGN-04)
+- [x] 01-04: Theme provider with tri-state support (DSGN-05)
+- [x] 01-05: Accent color and glassmorphism utilities (DSGN-06, DSGN-07)
 
 ### Phase 2: Component Library
 **Goal**: Provide a complete set of UI primitives that embody the Linear/Notion aesthetic
@@ -55,9 +55,10 @@ Plans:
 **Plans**: TBD
 
 Plans:
-- [ ] 02-01: Base form components (Button, Input, Textarea, Select)
-- [ ] 02-02: Container components (Card, Dialog, Badge)
-- [ ] 02-03: Feedback components (Toast, Skeleton)
+- [x] 02-00: Test stubs for component tests
+- [x] 02-01: Form components (Input, Textarea, Select, Badge, Skeleton)
+- [ ] 02-02: Container components (Card, Dialog)
+- [ ] 02-03: Feedback components (Toast)
 - [ ] 02-04: Command palette and micro-interactions
 
 ### Phase 3: Layout System
@@ -142,8 +143,8 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Design System Foundation | 4/6 | In Progress|  |
-| 2. Component Library | 0/4 | Not started | - |
+| 1. Design System Foundation | 6/6 | Complete | 2026-03-09 |
+| 2. Component Library | 2/5 | In Progress | - |
 | 3. Layout System | 0/3 | Not started | - |
 | 4. State & API Layer | 0/3 | Not started | - |
 | 5. Console Feature | 0/6 | Not started | - |
