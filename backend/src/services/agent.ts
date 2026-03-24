@@ -1393,7 +1393,9 @@ export class AgentService {
     // When all critical (structural) parameters are present, auto-apply defaults
     // for non-critical parameters (includeReport, reportFormat, reportOutput, etc.)
     // so the user is not forced to confirm each one individually.
-    if (assessment.criticalMissing.length === 0 && assessment.nonCriticalMissing.length > 0) {
+    // Loop because applying one default (e.g. includeReport=true) may reveal
+    // new non-critical parameters (e.g. reportFormat, reportOutput).
+    while (assessment.criticalMissing.length === 0 && assessment.nonCriticalMissing.length > 0) {
       this.applyNonCriticalDefaults(workingSession, assessment.defaultProposals);
       assessment = await this.assessInteractionNeeds(workingSession, locale, params.context?.skillIds, 'chat');
     }
