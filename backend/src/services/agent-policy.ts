@@ -70,6 +70,23 @@ export class AgentPolicyService {
     return 'static';
   }
 
+  inferReportFormat(message: string): AgentPolicyReportFormat | undefined {
+    const text = message.toLowerCase();
+    if (text.includes('json')) return 'json';
+    if (text.includes('markdown') || text.includes('md')) return 'markdown';
+    if (text.includes('both') || text.includes('两种') || text.includes('都要')) return 'both';
+    if (text.includes('默认') || text.includes('default') || text.includes('确认') || text.includes('confirm')) return 'both';
+    return undefined;
+  }
+
+  inferReportOutput(message: string): AgentPolicyReportOutput | undefined {
+    const text = message.toLowerCase();
+    if (text.includes('file') || text.includes('文件')) return 'file';
+    if (text.includes('inline') || text.includes('内联') || text.includes('直接')) return 'inline';
+    if (text.includes('默认') || text.includes('default') || text.includes('确认') || text.includes('confirm')) return 'inline';
+    return undefined;
+  }
+
   normalizeReportFormat(value: string): AgentPolicyReportFormat {
     if (value === 'json' || value === 'markdown' || value === 'both') {
       return value;
