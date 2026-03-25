@@ -19,10 +19,6 @@ ENV NODE_ENV=production
 ENV PORT=8000
 ENV ANALYSIS_PYTHON_BIN=/usr/bin/python3
 
-# Use Aliyun mirror for faster apt downloads in China
-RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null; \
-    sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list 2>/dev/null; true
-
 # Install system dependencies for backend and embedded Python analysis runtime
 RUN apt-get update && \
     apt-get install -y wget openssl python3 python3-pip python3-venv && \
