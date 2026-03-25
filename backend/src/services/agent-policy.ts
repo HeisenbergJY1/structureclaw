@@ -72,10 +72,16 @@ export class AgentPolicyService {
 
   inferReportFormat(message: string): AgentPolicyReportFormat | undefined {
     const text = message.toLowerCase();
-    if (text.includes('json')) return 'json';
-    if (text.includes('markdown') || text.includes('md')) return 'markdown';
+    const hasJson = text.includes('json');
+    const hasMarkdownWord = text.includes('markdown');
+    const hasMdToken = /\bmd\b/.test(text) || /\.md\b/.test(text);
+    const hasMarkdown = hasMarkdownWord || hasMdToken;
+
+    if (hasJson && hasMarkdown) return 'both';
     if (text.includes('both') || text.includes('两种') || text.includes('都要')) return 'both';
     if (text.includes('默认') || text.includes('default') || text.includes('确认') || text.includes('confirm')) return 'both';
+    if (hasJson) return 'json';
+    if (hasMarkdown) return 'markdown';
     return undefined;
   }
 
