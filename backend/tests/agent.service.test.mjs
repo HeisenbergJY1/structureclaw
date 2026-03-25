@@ -1457,7 +1457,7 @@ describe('AgentService orchestration', () => {
 
     expect(third.interaction?.missingCritical).not.toContain('各层层高（m）');
     expect(third.interaction?.missingCritical).not.toContain('各层节点荷载（kN）');
-    expect(third.interaction?.state).toBe('collecting');
+    expect(third.interaction?.state).toBe('ready');
   });
 
   test('should merge 2d frame vertical and lateral loads across chat turns', async () => {
