@@ -87,8 +87,20 @@ export class AgentPolicyService {
 
   inferReportOutput(message: string): AgentPolicyReportOutput | undefined {
     const text = message.toLowerCase();
-    if (text.includes('file') || text.includes('文件')) return 'file';
-    if (text.includes('inline') || text.includes('内联') || text.includes('直接')) return 'inline';
+    const filePattern = /\bfile\b/;
+    const inlinePattern = /\binline\b/;
+    if (
+      filePattern.test(text)
+      || text.includes('文件')
+      || text.includes('输出到文件')
+      || text.includes('保存为文件')
+    ) return 'file';
+    if (
+      inlinePattern.test(text)
+      || text.includes('内联')
+      || text.includes('直接')
+      || text.includes('内联返回')
+    ) return 'inline';
     if (text.includes('默认') || text.includes('default') || text.includes('确认') || text.includes('confirm')) return 'inline';
     return undefined;
   }
