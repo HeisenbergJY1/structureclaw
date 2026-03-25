@@ -1610,7 +1610,7 @@ describe('AgentService orchestration', () => {
     expect(result.interaction?.recommendedNextStep).toContain('Load');
   });
 
-  test('should return synchronized model once chat has a complete structural model', async () => {
+  test('should return synchronized model and auto-apply noncritical defaults once structural params are complete', async () => {
     const svc = createServiceWithDefaultSkills();
     svc.llm = null;
 
@@ -1623,8 +1623,8 @@ describe('AgentService orchestration', () => {
     });
 
     expect(collecting.success).toBe(true);
-    expect(collecting.interaction?.state).toBe('collecting');
-    expect(collecting.interaction?.missingOptional).toContain('是否生成报告');
+    expect(collecting.interaction?.state).toBe('ready');
+    expect(collecting.interaction?.missingOptional ?? []).toEqual([]);
     expect(collecting.model?.schema_version).toBe('1.0.0');
     expect(Array.isArray(collecting.model?.nodes)).toBe(true);
 
@@ -1641,7 +1641,7 @@ describe('AgentService orchestration', () => {
     expect(incomplete.model).toBeUndefined();
   });
 
-  test('should return synchronized frame model before noncritical report preferences are ready', async () => {
+  test('should return synchronized frame model with noncritical defaults auto-applied', async () => {
     const svc = createServiceWithDefaultSkills();
     svc.llm = null;
 
@@ -1655,7 +1655,7 @@ describe('AgentService orchestration', () => {
 
     expect(collecting.success).toBe(true);
     expect(collecting.interaction?.detectedScenario).toBe('frame');
-    expect(collecting.interaction?.state).toBe('collecting');
+    expect(collecting.interaction?.state).toBe('ready');
     expect(collecting.model?.schema_version).toBe('1.0.0');
     expect(collecting.model?.metadata?.inferredType).toBe('frame');
     expect(Array.isArray(collecting.model?.nodes)).toBe(true);
