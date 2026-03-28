@@ -1,7 +1,6 @@
 import {
   buildLegacyDraftPatchLlmFirst,
   buildLegacyLabels,
-  buildLegacyModel,
   computeLegacyMissing,
   mergeLegacyDraftPatchLlmFirst,
   mergeLegacyState,
@@ -18,10 +17,13 @@ import type {
   DraftFloorLoad,
   DraftState,
   InteractionQuestion,
+  ScenarioMatch,
   SkillDefaultProposal,
   SkillHandler,
   SkillReportNarrativeInput,
 } from '../../../agent-runtime/types.js';
+
+// ─── Domain key sets ────────────────────────────────────────────────────────
 
 const GEOMETRY_KEYS = [
   'frameDimension',
@@ -38,6 +40,7 @@ const GEOMETRY_KEYS = [
 const LOAD_BOUNDARY_KEYS = ['floorLoads', 'frameBaseSupportType'] as const;
 const ALLOWED_KEYS = combineDomainKeys(GEOMETRY_KEYS, LOAD_BOUNDARY_KEYS);
 
+// Geometry + loads required keys (material/section checked separately in computeMissing)
 const REQUIRED_KEYS = [
   'frameDimension',
   'storyCount',
@@ -51,6 +54,88 @@ const REQUIRED_KEYS = [
   'floorLoads',
 ] as const;
 
+// Frame-specific required keys managed inside the handler
+const FRAME_MATERIAL_KEYS = ['frameMaterial', 'frameColumnSection', 'frameBeamSection'] as const;
+
+// ─── Steel grade properties ──────────────────────────────────────────────────
+// E, G: MPa; nu: –; rho: kg/m³; fy: MPa (yield strength)
+
+const STEEL_GRADE_PROPERTIES: Record<string, { E: number; G: number; nu: number; rho: number; fy: number }> = {
+  Q235: { E: 206000, G: 79000, nu: 0.3, rho: 7850, fy: 235 },
+  Q345: { E: 206000, G: 79000, nu: 0.3, rho: 7850, fy: 345 },
+  Q355: { E: 206000, G: 79000, nu: 0.3, rho: 7850, fy: 355 },
+  Q390: { E: 206000, G: 79000, nu: 0.3, rho: 7850, fy: 390 },
+  Q420: { E: 206000, G: 79000, nu: 0.3, rho: 7850, fy: 420 },
+  S235: { E: 210000, G: 81000, nu: 0.3, rho: 7850, fy: 235 },
+  S275: { E: 210000, G: 81000, nu: 0.3, rho: 7850, fy: 275 },
+  S355: { E: 210000, G: 81000, nu: 0.3, rho: 7850, fy: 355 },
+  A36:  { E: 200000, G: 77000, nu: 0.3, rho: 7850, fy: 248 },
+};
+
+// ─── H-section properties ────────────────────────────────────────────────────
+// A: m²; Iy (strong): m⁴; Iz (weak): m⁴; J (St. Venant torsion): m⁴
+// Keys use uppercase X as delimiter (e.g. HW350X350)
+
+const H_SECTION_PROPERTIES: Record<string, { A: number; Iy: number; Iz: number; J: number }> = {
+  'HW200X200': { A: 0.00640, Iy: 4.72e-5, Iz: 1.60e-5, J: 1.70e-6 },
+  'HW250X250': { A: 0.00920, Iy: 1.07e-4, Iz: 3.65e-5, J: 2.90e-6 },
+  'HW300X300': { A: 0.01192, Iy: 2.04e-4, Iz: 6.75e-5, J: 4.23e-6 },
+  'HW350X350': { A: 0.01739, Iy: 4.03e-4, Iz: 1.36e-4, J: 8.63e-6 },
+  'HW400X400': { A: 0.01972, Iy: 6.67e-4, Iz: 2.24e-4, J: 1.01e-5 },
+  'HW450X300': { A: 0.01870, Iy: 7.93e-4, Iz: 2.03e-4, J: 9.86e-6 },
+  'HN300X150': { A: 0.00487, Iy: 7.21e-5, Iz: 5.08e-6, J: 5.18e-7 },
+  'HN350X175': { A: 0.00629, Iy: 1.36e-4, Iz: 9.84e-6, J: 6.32e-7 },
+  'HN400X200': { A: 0.00842, Iy: 2.37e-4, Iz: 1.74e-5, J: 8.44e-7 },
+  'HN450X200': { A: 0.00961, Iy: 3.32e-4, Iz: 1.87e-5, J: 9.68e-7 },
+  'HN500X200': { A: 0.01143, Iy: 5.02e-4, Iz: 2.14e-5, J: 1.24e-6 },
+  'HN600X200': { A: 0.01341, Iy: 9.06e-4, Iz: 2.27e-5, J: 1.48e-6 },
+};
+
+function getDefaultColumnSection(storyCount: number): string {
+  if (storyCount > 10) return 'HW400X400';
+  if (storyCount > 5) return 'HW350X350';
+  return 'HW300X300';
+}
+
+function getDefaultBeamSection(storyCount: number): string {
+  if (storyCount > 10) return 'HN500X200';
+  if (storyCount > 5) return 'HN400X200';
+  return 'HN300X150';
+}
+
+function normalizeSteelGrade(raw: string): string {
+  const upper = raw.toUpperCase();
+  return Object.keys(STEEL_GRADE_PROPERTIES).find((g) => g === upper) ?? upper;
+}
+
+function normalizeSectionName(raw: string): string {
+  return raw.toUpperCase().replace(/[×x]/gi, 'X');
+}
+
+type SteelGradeProps = { E: number; G: number; nu: number; rho: number; fy: number };
+type SectionProps = { name: string; A: number; Iy: number; Iz: number; J: number; G: number };
+
+function resolveSteelGradeProps(grade: string | undefined): SteelGradeProps {
+  const normalized = normalizeSteelGrade(grade ?? 'Q355');
+  return STEEL_GRADE_PROPERTIES[normalized] ?? STEEL_GRADE_PROPERTIES['Q355'];
+}
+
+function resolveSectionProps(
+  section: string | undefined,
+  role: 'column' | 'beam',
+  storyCount: number,
+  matG: number,
+): SectionProps {
+  const defaultSection = role === 'column'
+    ? getDefaultColumnSection(storyCount)
+    : getDefaultBeamSection(storyCount);
+  const normalized = section ? normalizeSectionName(section) : defaultSection;
+  const props = H_SECTION_PROPERTIES[normalized] ?? H_SECTION_PROPERTIES[defaultSection];
+  return { name: normalized, ...props, G: matG };
+}
+
+// ─── Domain projection ───────────────────────────────────────────────────────
+
 function toFramePatch(patch: DraftExtraction): DraftExtraction {
   const domainPatch = composeStructuralDomainPatch({
     patch,
@@ -60,32 +145,19 @@ function toFramePatch(patch: DraftExtraction): DraftExtraction {
   return restrictLegacyDraftPatch(domainPatch, 'frame', [...ALLOWED_KEYS]);
 }
 
+// ─── Chinese numeral helpers ─────────────────────────────────────────────────
+
 const CHINESE_NUMERAL_MAP: Record<string, number> = {
-  '一': 1,
-  '二': 2,
-  '两': 2,
-  '三': 3,
-  '四': 4,
-  '五': 5,
-  '六': 6,
-  '七': 7,
-  '八': 8,
-  '九': 9,
-  '十': 10,
+  '一': 1, '二': 2, '两': 2, '三': 3, '四': 4,
+  '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10,
 };
 
 function parseLocalizedPositiveInt(raw: string | undefined): number | undefined {
-  if (!raw) {
-    return undefined;
-  }
+  if (!raw) return undefined;
   const trimmed = raw.trim();
   const direct = normalizePositiveInteger(trimmed);
-  if (direct !== undefined) {
-    return direct;
-  }
-  if (trimmed === '十') {
-    return 10;
-  }
+  if (direct !== undefined) return direct;
+  if (trimmed === '十') return 10;
   if (trimmed.length === 2 && trimmed.startsWith('十')) {
     const ones = CHINESE_NUMERAL_MAP[trimmed[1]];
     return ones ? 10 + ones : undefined;
@@ -100,13 +172,9 @@ function parseLocalizedPositiveInt(raw: string | undefined): number | undefined 
 function extractPositiveInt(text: string, patterns: RegExp[]): number | undefined {
   for (const pattern of patterns) {
     const match = text.match(pattern);
-    if (!match?.[1]) {
-      continue;
-    }
+    if (!match?.[1]) continue;
     const value = parseLocalizedPositiveInt(match[1]);
-    if (value !== undefined) {
-      return value;
-    }
+    if (value !== undefined) return value;
   }
   return undefined;
 }
@@ -114,19 +182,15 @@ function extractPositiveInt(text: string, patterns: RegExp[]): number | undefine
 function extractScalar(text: string, patterns: RegExp[]): number | undefined {
   for (const pattern of patterns) {
     const match = text.match(pattern);
-    if (!match?.[1]) {
-      continue;
-    }
+    if (!match?.[1]) continue;
     const value = normalizeNumber(match[1]);
-    if (value !== undefined && value > 0) {
-      return value;
-    }
+    if (value !== undefined && value > 0) return value;
   }
   return undefined;
 }
 
 function extractDirectionalLoadScalar(text: string, axis: 'x' | 'y'): number | undefined {
-  const axisToken = axis === 'x' ? 'x' : 'y';
+  const axisToken = axis;
   return extractScalar(text, [
     new RegExp(`${axisToken}向(?:水平|横向|侧向)?荷载(?:都?是|均为|各为|分别为|分别取|取|按|为|是)?\\s*([0-9]+(?:\\.[0-9]+)?)\\s*(?:kn|千牛)`, 'i'),
     new RegExp(`(?:水平|横向|侧向)?荷载(?:都?是|均为|各为|分别为|分别取|取|按|为|是)?[^\\n]{0,24}?${axisToken}向\\s*([0-9]+(?:\\.[0-9]+)?)\\s*(?:kn|千牛)`, 'i'),
@@ -139,9 +203,7 @@ function shouldMirrorHorizontalLoadToBothAxes(
   existingState: DraftState | undefined,
   inferred3d: boolean,
 ): boolean {
-  if (!(inferred3d || existingState?.frameDimension === '3d')) {
-    return false;
-  }
+  if (!(inferred3d || existingState?.frameDimension === '3d')) return false;
   return (
     text.includes('水平方向荷载')
     || text.includes('水平荷载都是')
@@ -154,9 +216,7 @@ function shouldMirrorHorizontalLoadToBothAxes(
 }
 
 function repeatScalar(count: number | undefined, value: number | undefined): number[] | undefined {
-  if (!count || !value) {
-    return undefined;
-  }
+  if (!count || !value) return undefined;
   return Array.from({ length: count }, () => value);
 }
 
@@ -167,18 +227,42 @@ function extractDirectionalSegment(text: string, axis: 'x' | 'y'): string {
   return text.match(pattern)?.[1] || '';
 }
 
+/**
+ * Extract unequal span array from a directional segment.
+ * Handles patterns such as "跨度分别6m、9m、6m", "跨度5m、7m", "分别6m和9m".
+ * Returns the values only when 2+ distinct values are found to avoid confusing
+ * a scalar mention with a list.
+ */
+function extractSpanArray(segment: string): number[] | undefined {
+  if (!segment) return undefined;
+
+  const tryExtract = (re: RegExp): number[] | undefined => {
+    const match = segment.match(re);
+    if (!match?.[1]) return undefined;
+    const values = [...match[1].matchAll(/([\d.]+)(?=\s*(?:m|米))/gi)]
+      .map((m) => parseFloat(m[1]))
+      .filter((v) => Number.isFinite(v) && v > 0 && v < 500);
+    return values.length >= 2 ? values : undefined;
+  };
+
+  // Anchor to span-context keyword, then collect consecutive Xm tokens
+  const spanContextRe = /(?:跨度|各跨|bay\s*width)\s*(?:分别|各为|为|是)?\s*((?:[\d.]+\s*(?:m|米)\s*[、，,和\s]?\s*)+)/i;
+  // Fallback: "分别" prefix alone (e.g. "分别6m、9m")
+  const dividedRe = /(?:^|[，,、\s])分别\s*((?:[\d.]+\s*(?:m|米)\s*[、，,和\s]?\s*)+)/i;
+
+  return tryExtract(spanContextRe) ?? tryExtract(dividedRe);
+}
+
+// ─── Load helpers ────────────────────────────────────────────────────────────
+
 function buildUniformFloorLoads(
   storyCount: number | undefined,
   verticalKN: number | undefined,
   lateralXKN: number | undefined,
   lateralYKN: number | undefined,
 ): DraftFloorLoad[] | undefined {
-  if (!storyCount) {
-    return undefined;
-  }
-  if (verticalKN === undefined && lateralXKN === undefined && lateralYKN === undefined) {
-    return undefined;
-  }
+  if (!storyCount) return undefined;
+  if (verticalKN === undefined && lateralXKN === undefined && lateralYKN === undefined) return undefined;
   return Array.from({ length: storyCount }, (_, index) => ({
     story: index + 1,
     verticalKN,
@@ -191,17 +275,10 @@ function mergeFloorLoads(
   existing: DraftFloorLoad[] | undefined,
   incoming: DraftFloorLoad[] | undefined,
 ): DraftFloorLoad[] | undefined {
-  if (!existing?.length) {
-    return incoming;
-  }
-  if (!incoming?.length) {
-    return existing;
-  }
-
+  if (!existing?.length) return incoming;
+  if (!incoming?.length) return existing;
   const merged = new Map<number, DraftFloorLoad>();
-  for (const load of existing) {
-    merged.set(load.story, { ...load });
-  }
+  for (const load of existing) merged.set(load.story, { ...load });
   for (const load of incoming) {
     const current = merged.get(load.story);
     merged.set(load.story, {
@@ -211,12 +288,52 @@ function mergeFloorLoads(
       lateralYKN: load.lateralYKN ?? current?.lateralYKN,
     });
   }
-
   return Array.from(merged.values()).sort((left, right) => left.story - right.story);
 }
 
+// ─── Material and section extraction ────────────────────────────────────────
+
+function extractSteelGrade(text: string): string | undefined {
+  // With explicit material keyword (highest priority)
+  const withKeyword = text.match(
+    /(?:材料|钢材|钢种|牌号|采用|选用)[\s:：]*([Qq][0-9]{3,4}|[Ss][0-9]{3}|[Aa]36)/i,
+  );
+  if (withKeyword?.[1]) return normalizeSteelGrade(withKeyword[1]);
+
+  // Standalone grade identifier, anchored to avoid false positives
+  const gradeMatch = text.match(/(?:^|[^a-zA-Z0-9])([Qq](?:235|345|355|390|420))(?![0-9])/);
+  if (gradeMatch?.[1]) return normalizeSteelGrade(gradeMatch[1]);
+
+  // International grades
+  const intlMatch = text.match(/(?:steel\s*grade|grade|material)\s*([Ss](?:235|275|355)|[Aa]36)\b/i);
+  if (intlMatch?.[1]) return normalizeSteelGrade(intlMatch[1]);
+
+  return undefined;
+}
+
+function extractSectionDesignation(text: string, role: 'column' | 'beam'): string | undefined {
+  const roleZh = role === 'column' ? '柱' : '梁';
+  const roleEn = role === 'column' ? 'column' : 'beam';
+  const secPat = '[Hh][WwNn][0-9]+(?:[xX×][0-9]+){1,3}';
+
+  const withRoleBefore = new RegExp(`${roleZh}(?:截面|断面|型号|规格)?[\\s:：]*(${secPat})`, 'i');
+  const withRoleAfter = new RegExp(`(${secPat})\\s*${roleZh}`, 'i');
+  const withEnBefore = new RegExp(`${roleEn}\\s*section\\s*(${secPat})`, 'i');
+
+  const m1 = text.match(withRoleBefore);
+  if (m1?.[1]) return normalizeSectionName(m1[1]);
+  const m2 = text.match(withRoleAfter);
+  if (m2?.[1]) return normalizeSectionName(m2[1]);
+  const m3 = text.match(withEnBefore);
+  if (m3?.[1]) return normalizeSectionName(m3[1]);
+  return undefined;
+}
+
+// ─── Natural language extraction ─────────────────────────────────────────────
+
 function normalizeFrameNaturalPatch(message: string, existingState: DraftState | undefined): DraftExtraction {
   const text = message.toLowerCase();
+
   const storyCount = extractPositiveInt(text, [
     /([0-9]+|[一二两三四五六七八九十]+)\s*层/i,
     /([0-9]+|[一二两三四五六七八九十]+)\s*stories?/i,
@@ -225,8 +342,10 @@ function normalizeFrameNaturalPatch(message: string, existingState: DraftState |
     /([0-9]+|[一二两三四五六七八九十]+)\s*跨/i,
     /([0-9]+|[一二两三四五六七八九十]+)\s*bays?/i,
   ]);
+
   const xSegment = extractDirectionalSegment(text, 'x');
   const ySegment = extractDirectionalSegment(text, 'y');
+
   const bayCountX = extractPositiveInt(xSegment, [
     /([0-9]+|[一二两三四五六七八九十]+)\s*跨/i,
     /([0-9]+|[一二两三四五六七八九十]+)\s*bays?/i,
@@ -235,24 +354,37 @@ function normalizeFrameNaturalPatch(message: string, existingState: DraftState |
     /([0-9]+|[一二两三四五六七八九十]+)\s*跨/i,
     /([0-9]+|[一二两三四五六七八九十]+)\s*bays?/i,
   ]);
+
   const storyHeightScalar = extractScalar(text, [
     /每层(?:层高)?(?:都?是|统一为|为|高)?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:m|米)/i,
     /层高(?:都?是|统一为|为)?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:m|米)/i,
   ]);
-  const xBayScalar = extractScalar(xSegment, [
-    /(?:间隔|跨度|每跨)(?:也?是|都?是|为)?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:m|米)/i,
-  ]);
-  const yBayScalar = extractScalar(ySegment, [
-    /(?:间隔|跨度|每跨)(?:也?是|都?是|为)?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:m|米)/i,
-  ]);
+
+  // Span extraction: array-first (unequal spans), scalar fallback
+  const xSpanArray = extractSpanArray(xSegment);
+  const ySpanArray = extractSpanArray(ySegment);
+  const xBayScalar = xSpanArray
+    ? undefined
+    : extractScalar(xSegment, [
+      /(?:间隔|跨度|每跨)(?:也?是|都?是|为)?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:m|米)/i,
+    ]);
+  const yBayScalar = ySpanArray
+    ? undefined
+    : extractScalar(ySegment, [
+      /(?:间隔|跨度|每跨)(?:也?是|都?是|为)?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:m|米)/i,
+    ]);
   const genericBayScalar = extractScalar(text, [
     /每跨(?:都?是|为)?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:m|米)/i,
     /跨度(?:都?是|也是|为)?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:m|米)/i,
     /间隔(?:都?是|也是|为)?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:m|米)/i,
   ]);
+
+  // Vertical load — with or without 荷载 keyword
   const verticalLoadKN = extractScalar(text, [
     /(?:每层|各层)(?:节点)?(?:竖向)?荷载(?:都?是|均为|为|是)?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:kn|千牛)/i,
+    /(?:每层|各层)竖向\s*([0-9]+(?:\.[0-9]+)?)\s*(?:kn|千牛)/i,
   ]);
+
   const dualLateralLoadKN = extractScalar(text, [
     /x(?:、|\/|和|及)\s*y向(?:水平|横向|侧向)?荷载(?:都?是|均为|各为|为|是)?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:kn|千牛)/i,
   ]);
@@ -262,13 +394,16 @@ function normalizeFrameNaturalPatch(message: string, existingState: DraftState |
     /(?:横向|侧向|水平)荷载(?:都?是|均为|为|是)?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:kn|千牛)/i,
   ]) ?? extractDirectionalLoadScalar(text, 'x');
   const extractedLateralYLoadKN = dualLateralLoadKN ?? extractDirectionalLoadScalar(text, 'y');
+
   const resolvedStoryCount = storyCount ?? existingState?.storyCount ?? existingState?.storyHeightsM?.length;
   const resolvedBayCountX = bayCountX ?? existingState?.bayCountX;
   const resolvedBayCountY = bayCountY ?? existingState?.bayCountY;
+
   const inferred3d = text.includes('y方向')
     || text.includes('y向')
     || bayCountY !== undefined
     || yBayScalar !== undefined
+    || ySpanArray !== undefined
     || extractedLateralYLoadKN !== undefined;
   const resolvedFrameDimension = inferred3d
     ? '3d'
@@ -277,35 +412,42 @@ function normalizeFrameNaturalPatch(message: string, existingState: DraftState |
   const lateralXLoadKN = extractedLateralXLoadKN;
   const lateralYLoadKN = extractedLateralYLoadKN ?? (mirrorHorizontalLoad ? extractedLateralXLoadKN : undefined);
 
+  // Material and section (use original message for case-sensitive grade patterns)
+  const frameMaterial = extractSteelGrade(message) ?? extractSteelGrade(text);
+  const frameColumnSection = extractSectionDesignation(message, 'column');
+  const frameBeamSection = extractSectionDesignation(message, 'beam');
+
   return {
     inferredType: 'frame',
     frameDimension: resolvedFrameDimension,
     storyCount,
     bayCount: resolvedFrameDimension !== '3d' ? genericBayCount : undefined,
-    bayCountX,
-    bayCountY,
+    bayCountX: xSpanArray ? xSpanArray.length : bayCountX,
+    bayCountY: ySpanArray ? ySpanArray.length : bayCountY,
     storyHeightsM: repeatScalar(resolvedStoryCount, storyHeightScalar),
-    bayWidthsM: resolvedFrameDimension !== '3d' ? repeatScalar(genericBayCount ?? existingState?.bayCount, genericBayScalar) : undefined,
-    bayWidthsXM: repeatScalar(resolvedBayCountX, xBayScalar ?? (resolvedFrameDimension === '3d' ? genericBayScalar : undefined)),
-    bayWidthsYM: repeatScalar(resolvedBayCountY, yBayScalar),
+    bayWidthsM: resolvedFrameDimension !== '3d'
+      ? repeatScalar(genericBayCount ?? existingState?.bayCount, genericBayScalar)
+      : undefined,
+    bayWidthsXM: xSpanArray
+      ?? repeatScalar(resolvedBayCountX, xBayScalar ?? (resolvedFrameDimension === '3d' ? genericBayScalar : undefined)),
+    bayWidthsYM: ySpanArray ?? repeatScalar(resolvedBayCountY, yBayScalar),
     floorLoads: buildUniformFloorLoads(
       resolvedStoryCount,
       verticalLoadKN,
       lateralXLoadKN,
       resolvedFrameDimension === '3d' ? lateralYLoadKN : undefined,
     ),
+    ...(frameMaterial !== undefined && { frameMaterial }),
+    ...(frameColumnSection !== undefined && { frameColumnSection }),
+    ...(frameBeamSection !== undefined && { frameBeamSection }),
   };
 }
 
 function extractLlmScalar(raw: Record<string, unknown> | null | undefined, keys: string[]): number | undefined {
-  if (!raw) {
-    return undefined;
-  }
+  if (!raw) return undefined;
   for (const key of keys) {
     const value = normalizeNumber(raw[key]);
-    if (value !== undefined && value > 0) {
-      return value;
-    }
+    if (value !== undefined && value > 0) return value;
   }
   return undefined;
 }
@@ -329,6 +471,17 @@ function buildFramePatchFromLlm(
   const frameDimension = normalized.frameDimension
     ?? (normalized.bayCountY !== undefined || normalized.bayWidthsYM !== undefined || lateralYKN !== undefined ? '3d' : undefined);
 
+  // Material/section from LLM patch — bypass toFramePatch domain filter
+  const frameMaterial = typeof rawPatch?.frameMaterial === 'string'
+    ? normalizeSteelGrade(rawPatch.frameMaterial)
+    : undefined;
+  const frameColumnSection = typeof rawPatch?.frameColumnSection === 'string'
+    ? normalizeSectionName(rawPatch.frameColumnSection)
+    : undefined;
+  const frameBeamSection = typeof rawPatch?.frameBeamSection === 'string'
+    ? normalizeSectionName(rawPatch.frameBeamSection)
+    : undefined;
+
   return {
     ...normalized,
     frameDimension,
@@ -337,6 +490,9 @@ function buildFramePatchFromLlm(
     bayWidthsXM: normalized.bayWidthsXM ?? repeatScalar(bayCountX, bayWidthXScalar ?? bayWidthScalar),
     bayWidthsYM: normalized.bayWidthsYM ?? repeatScalar(bayCountY, bayWidthYScalar ?? bayWidthScalar),
     floorLoads: normalized.floorLoads ?? buildUniformFloorLoads(storyCount, verticalLoadKN, lateralXKN, frameDimension === '3d' ? lateralYKN : undefined),
+    ...(frameMaterial !== undefined && { frameMaterial }),
+    ...(frameColumnSection !== undefined && { frameColumnSection }),
+    ...(frameBeamSection !== undefined && { frameBeamSection }),
   };
 }
 
@@ -353,15 +509,13 @@ function coerceFrameDimension(
   const mentions3dDirections = (
     text.includes('x、y向')
     || text.includes('x/y向')
-    || text.includes('x 向') && text.includes('y 向')
-    || text.includes('x向') && text.includes('y向')
+    || (text.includes('x 向') && text.includes('y 向'))
+    || (text.includes('x向') && text.includes('y向'))
     || text.includes('3d')
     || text.includes('三维')
   );
   const nextPatch: DraftExtraction = { ...patch };
-  if (nextPatch.frameDimension !== undefined) {
-    return nextPatch;
-  }
+  if (nextPatch.frameDimension !== undefined) return nextPatch;
   if (nextPatch.frameDimension === '3d' || hasLateralYFloorLoad(nextPatch.floorLoads)) {
     nextPatch.frameDimension = '3d';
     return nextPatch;
@@ -382,7 +536,8 @@ function buildFrameDraftPatch(
   existingState: DraftState | undefined,
 ): DraftExtraction {
   const normalizedLlmPatch = buildFramePatchFromLlm(llmDraftPatch, existingState);
-  const normalizedNaturalPatch = toFramePatch(normalizeFrameNaturalPatch(message, existingState));
+  const rawNaturalPatch = normalizeFrameNaturalPatch(message, existingState);
+  const normalizedNaturalPatch = toFramePatch(rawNaturalPatch);
   const normalizedRulePatch = toFramePatch(buildLegacyDraftPatchLlmFirst(message, null));
   const mergedRulePatch = mergeFloorLoads(
     normalizedRulePatch.floorLoads,
@@ -395,33 +550,252 @@ function buildFrameDraftPatch(
     : mergeLegacyDraftPatchLlmFirst(normalizedNaturalPatch, normalizedRulePatch);
   const nextPatch = mergeLegacyDraftPatchLlmFirst(normalizedLlmPatch, mergedRulePatch);
 
+  // Material/section: LLM takes priority over natural language extraction.
+  // These fields bypass toFramePatch and are merged manually here.
+  const frameMaterial = (normalizedLlmPatch.frameMaterial as string | undefined)
+    ?? (rawNaturalPatch.frameMaterial as string | undefined);
+  const frameColumnSection = (normalizedLlmPatch.frameColumnSection as string | undefined)
+    ?? (rawNaturalPatch.frameColumnSection as string | undefined);
+  const frameBeamSection = (normalizedLlmPatch.frameBeamSection as string | undefined)
+    ?? (rawNaturalPatch.frameBeamSection as string | undefined);
+
   return coerceFrameDimension(
     {
       ...nextPatch,
       inferredType: 'frame',
+      ...(frameMaterial !== undefined && { frameMaterial }),
+      ...(frameColumnSection !== undefined && { frameColumnSection }),
+      ...(frameBeamSection !== undefined && { frameBeamSection }),
     },
     existingState,
     message,
   );
 }
 
+// ─── Dimension inference ─────────────────────────────────────────────────────
+
 function inferFrameDimensionProposal(state: DraftState): '2d' | '3d' {
-  if (state.frameDimension === '3d') {
-    return '3d';
-  }
-  if ((state.bayCountY ?? 0) > 0) {
-    return '3d';
-  }
-  if ((state.bayWidthsYM?.length ?? 0) > 0) {
-    return '3d';
-  }
-  if (hasLateralYFloorLoad(state.floorLoads)) {
-    return '3d';
-  }
+  if (state.frameDimension === '3d') return '3d';
+  if ((state.bayCountY ?? 0) > 0) return '3d';
+  if ((state.bayWidthsYM?.length ?? 0) > 0) return '3d';
+  if (hasLateralYFloorLoad(state.floorLoads)) return '3d';
   return '2d';
 }
 
+// ─── Local frame model builders ──────────────────────────────────────────────
+
+function accumulateCoords(lengths: number[]): number[] {
+  const coords = [0];
+  for (const v of lengths) coords.push(coords[coords.length - 1] + v);
+  return coords;
+}
+
+function buildBaseRestraint(baseSupport: string): boolean[] {
+  return baseSupport === 'pinned'
+    ? [true, true, true, false, false, false]
+    : [true, true, true, true, true, true];
+}
+
+function n2dId(storyIdx: number, bayNodeIdx: number): string {
+  return `N${storyIdx}_${bayNodeIdx}`;
+}
+
+function n3dId(storyIdx: number, xIdx: number, yIdx: number): string {
+  return `N${storyIdx}_${xIdx}_${yIdx}`;
+}
+
+function buildFrame2dLocalModel(
+  state: DraftState,
+  matProps: SteelGradeProps,
+  colProps: SectionProps,
+  beamProps: SectionProps,
+  metadata: Record<string, unknown>,
+): Record<string, unknown> {
+  const bayWidths = state.bayWidthsM!;
+  const storyHeights = state.storyHeightsM!;
+  const floorLoads = state.floorLoads!;
+  const baseSupport = (state.frameBaseSupportType as string | undefined) ?? 'fixed';
+  const xCoords = accumulateCoords(bayWidths);
+  const yCoords = accumulateCoords(storyHeights);
+  const nodes: Array<Record<string, unknown>> = [];
+  const elements: Array<Record<string, unknown>> = [];
+  const loads: Array<Record<string, unknown>> = [];
+  let elementId = 1;
+
+  for (let si = 0; si < yCoords.length; si++) {
+    for (let bi = 0; bi < xCoords.length; bi++) {
+      const node: Record<string, unknown> = { id: n2dId(si, bi), x: xCoords[bi], y: yCoords[si], z: 0 };
+      if (si === 0) node.restraints = buildBaseRestraint(baseSupport);
+      nodes.push(node);
+    }
+  }
+  for (let si = 1; si < yCoords.length; si++) {
+    for (let bi = 0; bi < xCoords.length; bi++) {
+      elements.push({ id: `C${elementId}`, type: 'beam', nodes: [n2dId(si - 1, bi), n2dId(si, bi)], material: '1', section: '1' });
+      elementId += 1;
+    }
+  }
+  for (let si = 1; si < yCoords.length; si++) {
+    for (let bi = 0; bi < bayWidths.length; bi++) {
+      elements.push({ id: `B${elementId}`, type: 'beam', nodes: [n2dId(si, bi), n2dId(si, bi + 1)], material: '1', section: '2' });
+      elementId += 1;
+    }
+  }
+  const levelNodeCount = xCoords.length;
+  for (const load of floorLoads) {
+    const si = load.story;
+    if (si <= 0 || si >= yCoords.length) continue;
+    const vPerNode = load.verticalKN !== undefined ? -load.verticalKN / levelNodeCount : undefined;
+    const lPerNode = load.lateralXKN !== undefined ? load.lateralXKN / levelNodeCount : undefined;
+    for (let bi = 0; bi < xCoords.length; bi++) {
+      const nodeLoad: Record<string, unknown> = { node: n2dId(si, bi) };
+      if (vPerNode !== undefined) nodeLoad.fy = vPerNode;
+      if (lPerNode !== undefined) nodeLoad.fx = lPerNode;
+      if (Object.keys(nodeLoad).length > 1) loads.push(nodeLoad);
+    }
+  }
+
+  return {
+    schema_version: '1.0.0',
+    unit_system: 'SI',
+    nodes,
+    elements,
+    materials: [{ id: '1', name: (state.frameMaterial as string | undefined) ?? 'Q355', E: matProps.E, nu: matProps.nu, rho: matProps.rho, fy: matProps.fy }],
+    sections: [
+      { id: '1', name: colProps.name, type: 'beam', properties: { A: colProps.A, Iy: colProps.Iy, Iz: colProps.Iz, J: colProps.J, G: colProps.G } },
+      { id: '2', name: beamProps.name, type: 'beam', properties: { A: beamProps.A, Iy: beamProps.Iy, Iz: beamProps.Iz, J: beamProps.J, G: beamProps.G } },
+    ],
+    load_cases: [{ id: 'LC1', type: 'other', loads }],
+    load_combinations: [{ id: 'ULS', factors: { LC1: 1.0 } }],
+    metadata: {
+      ...metadata,
+      baseSupport,
+      material: (state.frameMaterial as string | undefined) ?? 'Q355',
+      columnSection: colProps.name,
+      beamSection: beamProps.name,
+      storyCount: storyHeights.length,
+      bayCount: bayWidths.length,
+      geometry: { storyHeightsM: storyHeights, bayWidthsM: bayWidths },
+    },
+  };
+}
+
+function buildFrame3dLocalModel(
+  state: DraftState,
+  matProps: SteelGradeProps,
+  colProps: SectionProps,
+  beamProps: SectionProps,
+  metadata: Record<string, unknown>,
+): Record<string, unknown> {
+  const bayWidthsX = state.bayWidthsXM!;
+  const bayWidthsY = state.bayWidthsYM!;
+  const storyHeights = state.storyHeightsM!;
+  const floorLoads = state.floorLoads!;
+  const baseSupport = (state.frameBaseSupportType as string | undefined) ?? 'fixed';
+  const xCoords = accumulateCoords(bayWidthsX);
+  const zCoords = accumulateCoords(bayWidthsY);
+  const yCoords = accumulateCoords(storyHeights);
+  const nodes: Array<Record<string, unknown>> = [];
+  const elements: Array<Record<string, unknown>> = [];
+  const loads: Array<Record<string, unknown>> = [];
+  let elementId = 1;
+
+  for (let si = 0; si < yCoords.length; si++) {
+    for (let xi = 0; xi < xCoords.length; xi++) {
+      for (let yi = 0; yi < zCoords.length; yi++) {
+        const node: Record<string, unknown> = { id: n3dId(si, xi, yi), x: xCoords[xi], y: yCoords[si], z: zCoords[yi] };
+        if (si === 0) node.restraints = buildBaseRestraint(baseSupport);
+        nodes.push(node);
+      }
+    }
+  }
+  for (let si = 1; si < yCoords.length; si++) {
+    for (let xi = 0; xi < xCoords.length; xi++) {
+      for (let yi = 0; yi < zCoords.length; yi++) {
+        elements.push({ id: `C${elementId}`, type: 'beam', nodes: [n3dId(si - 1, xi, yi), n3dId(si, xi, yi)], material: '1', section: '1' });
+        elementId += 1;
+      }
+    }
+  }
+  for (let si = 1; si < yCoords.length; si++) {
+    for (let xi = 0; xi < bayWidthsX.length; xi++) {
+      for (let yi = 0; yi < zCoords.length; yi++) {
+        elements.push({ id: `BX${elementId}`, type: 'beam', nodes: [n3dId(si, xi, yi), n3dId(si, xi + 1, yi)], material: '1', section: '2' });
+        elementId += 1;
+      }
+    }
+  }
+  for (let si = 1; si < yCoords.length; si++) {
+    for (let xi = 0; xi < xCoords.length; xi++) {
+      for (let yi = 0; yi < bayWidthsY.length; yi++) {
+        elements.push({ id: `BY${elementId}`, type: 'beam', nodes: [n3dId(si, xi, yi), n3dId(si, xi, yi + 1)], material: '1', section: '2' });
+        elementId += 1;
+      }
+    }
+  }
+  const levelNodeCount = xCoords.length * zCoords.length;
+  for (const load of floorLoads) {
+    const si = load.story;
+    if (si <= 0 || si >= yCoords.length) continue;
+    const vPerNode = load.verticalKN !== undefined ? -load.verticalKN / levelNodeCount : undefined;
+    const lxPerNode = load.lateralXKN !== undefined ? load.lateralXKN / levelNodeCount : undefined;
+    const lyPerNode = load.lateralYKN !== undefined ? load.lateralYKN / levelNodeCount : undefined;
+    for (let xi = 0; xi < xCoords.length; xi++) {
+      for (let yi = 0; yi < zCoords.length; yi++) {
+        const nodeLoad: Record<string, unknown> = { node: n3dId(si, xi, yi) };
+        if (vPerNode !== undefined) nodeLoad.fy = vPerNode;
+        if (lxPerNode !== undefined) nodeLoad.fx = lxPerNode;
+        if (lyPerNode !== undefined) nodeLoad.fz = lyPerNode;
+        if (Object.keys(nodeLoad).length > 1) loads.push(nodeLoad);
+      }
+    }
+  }
+
+  return {
+    schema_version: '1.0.0',
+    unit_system: 'SI',
+    nodes,
+    elements,
+    materials: [{ id: '1', name: (state.frameMaterial as string | undefined) ?? 'Q355', E: matProps.E, nu: matProps.nu, rho: matProps.rho, fy: matProps.fy }],
+    sections: [
+      { id: '1', name: colProps.name, type: 'beam', properties: { A: colProps.A, Iy: colProps.Iy, Iz: colProps.Iz, J: colProps.J, G: colProps.G } },
+      { id: '2', name: beamProps.name, type: 'beam', properties: { A: beamProps.A, Iy: beamProps.Iy, Iz: beamProps.Iz, J: beamProps.J, G: beamProps.G } },
+    ],
+    load_cases: [{ id: 'LC1', type: 'other', loads }],
+    load_combinations: [{ id: 'ULS', factors: { LC1: 1.0 } }],
+    metadata: {
+      ...metadata,
+      baseSupport,
+      material: (state.frameMaterial as string | undefined) ?? 'Q355',
+      columnSection: colProps.name,
+      beamSection: beamProps.name,
+      storyCount: storyHeights.length,
+      bayCountX: bayWidthsX.length,
+      bayCountY: bayWidthsY.length,
+      geometry: { storyHeightsM: storyHeights, bayWidthsXM: bayWidthsX, bayWidthsYM: bayWidthsY },
+    },
+  };
+}
+
+function buildFrameLocalModel(state: DraftState): Record<string, unknown> {
+  const matGrade = state.frameMaterial as string | undefined;
+  const colSection = state.frameColumnSection as string | undefined;
+  const beamSection = state.frameBeamSection as string | undefined;
+  const storyCount = state.storyHeightsM?.length ?? (state.storyCount as number | undefined) ?? 0;
+  const matProps = resolveSteelGradeProps(matGrade);
+  const colProps = resolveSectionProps(colSection, 'column', storyCount, matProps.G);
+  const beamProps = resolveSectionProps(beamSection, 'beam', storyCount, matProps.G);
+  const metadata: Record<string, unknown> = { source: 'markdown-skill-draft', inferredType: 'frame' };
+  if (state.frameDimension === '3d') {
+    return buildFrame3dLocalModel(state, matProps, colProps, beamProps, metadata);
+  }
+  return buildFrame2dLocalModel(state, matProps, colProps, beamProps, metadata);
+}
+
+// ─── Default proposals and questions ────────────────────────────────────────
+
 function buildFrameDefaultReason(paramKey: string, locale: AppLocale, state: DraftState): string {
+  const storyCount = (state.storyHeightsM?.length ?? (state.storyCount as number | undefined)) ?? 0;
   switch (paramKey) {
     case 'frameDimension': {
       const dimension = inferFrameDimensionProposal(state);
@@ -438,6 +812,18 @@ function buildFrameDefaultReason(paramKey: string, locale: AppLocale, state: Dra
       return locale === 'zh'
         ? '框架柱脚默认采用固定支座，便于获得更稳健的初始刚度评估。'
         : 'Default frame base support to fixed to obtain a stable initial stiffness assessment.';
+    case 'frameMaterial':
+      return locale === 'zh'
+        ? '钢框架默认采用 Q355 钢材，符合 GB 50017 常规设计要求。'
+        : 'Default steel grade Q355, compliant with GB 50017 standard design practice.';
+    case 'frameColumnSection':
+      return locale === 'zh'
+        ? `根据 ${storyCount} 层框架规模，建议柱截面采用 ${getDefaultColumnSection(storyCount)}（GB/T 11263 热轧 H 型钢）。`
+        : `For a ${storyCount}-story frame, the recommended column section is ${getDefaultColumnSection(storyCount)} (GB/T 11263 hot-rolled H-section).`;
+    case 'frameBeamSection':
+      return locale === 'zh'
+        ? `根据 ${storyCount} 层框架规模，建议梁截面采用 ${getDefaultBeamSection(storyCount)}（GB/T 11263 热轧 H 型钢）。`
+        : `For a ${storyCount}-story frame, the recommended beam section is ${getDefaultBeamSection(storyCount)} (GB/T 11263 hot-rolled H-section).`;
     default:
       return locale === 'zh'
         ? `根据 ${paramKey} 的推荐值采用默认配置。`
@@ -446,13 +832,12 @@ function buildFrameDefaultReason(paramKey: string, locale: AppLocale, state: Dra
 }
 
 function buildFrameDefaultProposals(keys: string[], state: DraftState, locale: AppLocale): SkillDefaultProposal[] {
+  const storyCount = (state.storyHeightsM?.length ?? (state.storyCount as number | undefined)) ?? 0;
   const questions = buildInteractionQuestions(keys, [], { ...state, inferredType: 'frame' }, locale);
   const next = new Map<string, SkillDefaultProposal>();
 
   for (const question of questions) {
-    if (question.suggestedValue === undefined) {
-      continue;
-    }
+    if (question.suggestedValue === undefined) continue;
     next.set(question.paramKey, {
       paramKey: question.paramKey,
       value: question.suggestedValue,
@@ -474,6 +859,27 @@ function buildFrameDefaultProposals(keys: string[], state: DraftState, locale: A
       reason: buildFrameDefaultReason('frameBaseSupportType', locale, state),
     });
   }
+  if (keys.includes('frameMaterial')) {
+    next.set('frameMaterial', {
+      paramKey: 'frameMaterial',
+      value: 'Q355',
+      reason: buildFrameDefaultReason('frameMaterial', locale, state),
+    });
+  }
+  if (keys.includes('frameColumnSection')) {
+    next.set('frameColumnSection', {
+      paramKey: 'frameColumnSection',
+      value: getDefaultColumnSection(storyCount),
+      reason: buildFrameDefaultReason('frameColumnSection', locale, state),
+    });
+  }
+  if (keys.includes('frameBeamSection')) {
+    next.set('frameBeamSection', {
+      paramKey: 'frameBeamSection',
+      value: getDefaultBeamSection(storyCount),
+      reason: buildFrameDefaultReason('frameBeamSection', locale, state),
+    });
+  }
 
   return Array.from(next.values());
 }
@@ -485,6 +891,8 @@ function buildFrameQuestions(
   locale: AppLocale,
 ): InteractionQuestion[] {
   const inferredDimension = inferFrameDimensionProposal(state);
+  const storyCount = (state.storyHeightsM?.length ?? (state.storyCount as number | undefined)) ?? 0;
+
   return buildInteractionQuestions(keys, criticalMissing, { ...state, inferredType: 'frame' }, locale).map((question) => {
     if (question.paramKey === 'frameDimension') {
       return {
@@ -515,9 +923,49 @@ function buildFrameQuestions(
           : `Please confirm per-story nodal loads (kN). ${loadHint}`,
       };
     }
+    if (question.paramKey === 'frameMaterial') {
+      return {
+        paramKey: 'frameMaterial',
+        label: locale === 'zh' ? '钢材牌号' : 'Steel grade',
+        question: locale === 'zh'
+          ? '请确认钢材牌号（如 Q355、Q345、Q235、S355）。钢框架通常采用 Q355。'
+          : 'Please confirm the steel grade (e.g. Q355, Q345, Q235, S355). Q355 is common for steel frames.',
+        required: true,
+        critical: criticalMissing.includes('frameMaterial'),
+        suggestedValue: 'Q355',
+      };
+    }
+    if (question.paramKey === 'frameColumnSection') {
+      const suggested = storyCount > 0 ? getDefaultColumnSection(storyCount) : undefined;
+      return {
+        paramKey: 'frameColumnSection',
+        label: locale === 'zh' ? '柱截面' : 'Column section',
+        question: locale === 'zh'
+          ? `请确认柱截面规格（如 HW350X350）。${suggested ? `当前层数建议 ${suggested}。` : ''}`
+          : `Please confirm the column section designation (e.g. HW350X350).${suggested ? ` Suggested: ${suggested}.` : ''}`,
+        required: true,
+        critical: criticalMissing.includes('frameColumnSection'),
+        suggestedValue: suggested,
+      };
+    }
+    if (question.paramKey === 'frameBeamSection') {
+      const suggested = storyCount > 0 ? getDefaultBeamSection(storyCount) : undefined;
+      return {
+        paramKey: 'frameBeamSection',
+        label: locale === 'zh' ? '梁截面' : 'Beam section',
+        question: locale === 'zh'
+          ? `请确认梁截面规格（如 HN400X200）。${suggested ? `当前层数建议 ${suggested}。` : ''}`
+          : `Please confirm the beam section designation (e.g. HN400X200).${suggested ? ` Suggested: ${suggested}.` : ''}`,
+        required: true,
+        critical: criticalMissing.includes('frameBeamSection'),
+        suggestedValue: suggested,
+      };
+    }
     return question;
   });
 }
+
+// ─── Report narrative ────────────────────────────────────────────────────────
 
 function buildFrameReportNarrative(input: SkillReportNarrativeInput): string {
   const base = buildDefaultReportNarrative(input);
@@ -534,8 +982,10 @@ function buildFrameReportNarrative(input: SkillReportNarrativeInput): string {
   return [base, ...frameSpecificNotes].join('\n');
 }
 
+// ─── Skill handler export ────────────────────────────────────────────────────
+
 export const handler: SkillHandler = {
-  detectScenario({ message, locale }) {
+  detectScenario({ message, locale, currentState }) {
     const text = message.toLowerCase();
     if (
       (text.includes('frame') || text.includes('框架') || text.includes('钢框架'))
@@ -552,44 +1002,97 @@ export const handler: SkillHandler = {
     if (text.includes('frame') || text.includes('框架')) {
       return buildScenarioMatch('frame', 'frame', 'frame', 'supported', locale);
     }
+    // Sticky: maintain the active frame scenario for follow-up messages that lack
+    // an explicit frame keyword (e.g. "层高3.6m" as a second turn).
+    if (currentState?.inferredType === 'frame' && currentState.supportLevel !== 'unsupported') {
+      const key = (currentState.scenarioKey === 'steel-frame' ? 'steel-frame' : 'frame') as ScenarioMatch['key'];
+      return buildScenarioMatch(key, 'frame', 'frame', 'supported', locale);
+    }
     return null;
   },
+
   parseProvidedValues(values) {
-    return coerceFrameDimension(
+    const base = coerceFrameDimension(
       toFramePatch(normalizeLegacyDraftPatch(values)),
       undefined,
       JSON.stringify(values),
     );
+    return {
+      ...base,
+      ...(typeof values.frameMaterial === 'string' && { frameMaterial: normalizeSteelGrade(values.frameMaterial) }),
+      ...(typeof values.frameColumnSection === 'string' && { frameColumnSection: normalizeSectionName(values.frameColumnSection) }),
+      ...(typeof values.frameBeamSection === 'string' && { frameBeamSection: normalizeSectionName(values.frameBeamSection) }),
+    };
   },
+
   extractDraft({ message, llmDraftPatch, currentState }) {
     return buildFrameDraftPatch(message, llmDraftPatch, currentState);
   },
+
   mergeState(existing, patch) {
-    return mergeLegacyState(existing, coerceFrameDimension(toFramePatch(patch), existing, ''), 'frame', 'frame');
+    const domainMerged = mergeLegacyState(
+      existing,
+      coerceFrameDimension(toFramePatch(patch), existing, ''),
+      'frame',
+      'frame',
+    );
+    // Material/section bypass toFramePatch — merge manually on top of domain state
+    return {
+      ...domainMerged,
+      frameMaterial: (patch.frameMaterial as string | undefined) ?? (existing?.frameMaterial as string | undefined),
+      frameColumnSection: (patch.frameColumnSection as string | undefined) ?? (existing?.frameColumnSection as string | undefined),
+      frameBeamSection: (patch.frameBeamSection as string | undefined) ?? (existing?.frameBeamSection as string | undefined),
+    };
   },
+
   computeMissing(state, mode) {
-    return computeLegacyMissing(
+    const base = computeLegacyMissing(
       { ...state, inferredType: 'frame' },
       mode,
-      [...REQUIRED_KEYS]
+      [...REQUIRED_KEYS],
     );
+    const frameCritical: string[] = [];
+    for (const key of FRAME_MATERIAL_KEYS) {
+      if (!state[key]) frameCritical.push(key);
+    }
+    return { critical: [...base.critical, ...frameCritical], optional: base.optional };
   },
+
   mapLabels(keys, locale) {
-    return buildLegacyLabels(keys, locale);
+    return keys.map((key) => {
+      switch (key) {
+        case 'frameMaterial': return locale === 'zh' ? '钢材牌号' : 'Steel grade';
+        case 'frameColumnSection': return locale === 'zh' ? '柱截面' : 'Column section';
+        case 'frameBeamSection': return locale === 'zh' ? '梁截面' : 'Beam section';
+        default: return buildLegacyLabels([key], locale)[0];
+      }
+    });
   },
+
   buildQuestions(keys, criticalMissing, state, locale) {
     return buildFrameQuestions(keys, criticalMissing, state, locale);
   },
+
   buildDefaultProposals(keys, state, locale) {
     return buildFrameDefaultProposals(keys, state, locale);
   },
+
   buildReportNarrative(input) {
     return buildFrameReportNarrative(input);
   },
+
   buildModel(state) {
-    return buildLegacyModel({ ...state, inferredType: 'frame' });
+    return buildFrameLocalModel(state);
   },
+
   resolveStage(missingKeys) {
+    if (missingKeys.includes('inferredType')) return 'intent';
+    const modelKeys = new Set([
+      'frameDimension', 'storyCount', 'bayCount', 'bayCountX', 'bayCountY',
+      'storyHeightsM', 'bayWidthsM', 'bayWidthsXM', 'bayWidthsYM',
+      ...FRAME_MATERIAL_KEYS,
+    ]);
+    if (missingKeys.some((k) => modelKeys.has(k))) return 'model';
     return resolveLegacyStructuralStage(missingKeys);
   },
 };

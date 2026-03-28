@@ -618,6 +618,8 @@ export function extractDraftByRules(message: string): DraftExtraction {
   const verticalLoadKN = extractNumber(text, [
     /竖向荷载\s*(\d+(?:\.\d+)?)\s*(?:kn|千牛)/i,
     /每层竖向荷载\s*(\d+(?:\.\d+)?)\s*(?:kn|千牛)/i,
+    // Short-form without 荷载 keyword: "每层竖向100kN"
+    /(?:每层|各层)竖向\s*(\d+(?:\.\d+)?)\s*(?:kn|千牛)/i,
     /vertical load\s*(?:is|=)?\s*(\d+(?:\.\d+)?)\s*kn/i,
   ]);
   const extractedLateralXLoadKN = extractNumber(text, [
@@ -782,7 +784,7 @@ function extractFrameBaseSupport(text: string): FrameBaseSupportType | undefined
   if (text.includes('柱脚铰接') || text.includes('base pinned') || text.includes('pinned base')) {
     return 'pinned';
   }
-  if (text.includes('柱脚固结') || text.includes('fixed base')) {
+  if (text.includes('柱脚固结') || text.includes('柱脚固定') || text.includes('fixed base')) {
     return 'fixed';
   }
   return undefined;
