@@ -54,7 +54,9 @@ const REQUIRED_KEYS = [
   'floorLoads',
 ] as const;
 
-// Frame-specific required keys managed inside the handler
+// Frame-specific material/section fields — extracted and proposed but NOT blocking.
+// The model builder falls back to grade-appropriate defaults when these are absent,
+// so they never appear as critical-missing and do not block model generation.
 const FRAME_MATERIAL_KEYS = ['frameMaterial', 'frameColumnSection', 'frameBeamSection'] as const;
 
 // ─── Steel grade properties ──────────────────────────────────────────────────
@@ -1046,16 +1048,13 @@ export const handler: SkillHandler = {
   },
 
   computeMissing(state, mode) {
-    const base = computeLegacyMissing(
+    // Material/section auto-fill from defaults in buildFrameLocalModel, so they are
+    // never critical blockers. Only geometry + load keys are checked here.
+    return computeLegacyMissing(
       { ...state, inferredType: 'frame' },
       mode,
       [...REQUIRED_KEYS],
     );
-    const frameCritical: string[] = [];
-    for (const key of FRAME_MATERIAL_KEYS) {
-      if (!state[key]) frameCritical.push(key);
-    }
-    return { critical: [...base.critical, ...frameCritical], optional: base.optional };
   },
 
   mapLabels(keys, locale) {
@@ -1086,14 +1085,8 @@ export const handler: SkillHandler = {
   },
 
   resolveStage(missingKeys) {
-    if (missingKeys.includes('inferredType')) return 'intent';
-    const modelKeys = new Set([
-      'frameDimension', 'storyCount', 'bayCount', 'bayCountX', 'bayCountY',
-      'storyHeightsM', 'bayWidthsM', 'bayWidthsXM', 'bayWidthsYM',
-      ...FRAME_MATERIAL_KEYS,
-    ]);
-    if (missingKeys.some((k) => modelKeys.has(k))) return 'model';
-    return resolveLegacyStructuralStage(missingKeys);
+    // Material/section are not blocking — exclude them from stage routing
+    return resolveLegacyStructuralStage(missingKeys.filter((k) => !FRAME_MATERIAL_KEYS.includes(k as typeof FRAME_MATERIAL_KEYS[number])));
   },
 };
 
