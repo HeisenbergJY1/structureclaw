@@ -100,22 +100,24 @@
 - `POST /api/v1/agent/skillhub/disable`
 - `POST /api/v1/agent/skillhub/uninstall`
 
-## 7. 契约与回归脚本
+## 7. 契约与回归命令
 
-核心脚本：
+契约与分组回归通过 `node tests/runner.mjs ...` 执行（不再挂在 `sclaw` 上）。列出全部校验名：`node tests/runner.mjs validate --list`。
 
-- `./scripts/validate-agent-orchestration.sh`
-- `./scripts/validate-agent-no-skill-fallback.sh`
-- `./scripts/validate-agent-tools-contract.sh`
-- `./scripts/validate-agent-api-contract.sh`
-- `./scripts/validate-chat-stream-contract.sh`
-- `./scripts/validate-chat-message-routing.sh`
-- `./scripts/validate-report-template-contract.sh`
+核心命令：
+
+- `node tests/runner.mjs validate validate-agent-orchestration`
+- `node tests/runner.mjs validate validate-agent-no-skill-fallback`
+- `node tests/runner.mjs validate validate-agent-tools-contract`
+- `node tests/runner.mjs validate validate-agent-api-contract`
+- `node tests/runner.mjs validate validate-chat-stream-contract`
+- `node tests/runner.mjs validate validate-chat-message-routing`
+- `node tests/runner.mjs validate validate-report-template-contract`
 
 回归入口：
 
-- `make backend-regression`
-- `make analysis-regression`
+- `node tests/runner.mjs backend-regression`
+- `node tests/runner.mjs analysis-regression`
 
 ## 8. 相关文档
 

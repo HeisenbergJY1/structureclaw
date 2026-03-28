@@ -40,8 +40,6 @@ uploads/*
 backend/uploads/*
 !backend/uploads/.gitkeep
 
-
 # AI Editor & Agent configs
 .cursor/
 .kiro/
-.claude/

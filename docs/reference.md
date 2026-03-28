@@ -100,22 +100,24 @@ Practical rules:
 - `POST /api/v1/agent/skillhub/disable`
 - `POST /api/v1/agent/skillhub/uninstall`
 
-## 7. Contract Validation Scripts
+## 7. Contract Validation Commands
 
-Primary orchestration and protocol scripts:
+Contract checks and grouped regressions run via `node tests/runner.mjs ...` (not `sclaw`). List validation names with `node tests/runner.mjs validate --list`.
 
-- `./scripts/validate-agent-orchestration.sh`
-- `./scripts/validate-agent-no-skill-fallback.sh`
-- `./scripts/validate-agent-tools-contract.sh`
-- `./scripts/validate-agent-api-contract.sh`
-- `./scripts/validate-chat-stream-contract.sh`
-- `./scripts/validate-chat-message-routing.sh`
-- `./scripts/validate-report-template-contract.sh`
+Primary orchestration and protocol commands:
+
+- `node tests/runner.mjs validate validate-agent-orchestration`
+- `node tests/runner.mjs validate validate-agent-no-skill-fallback`
+- `node tests/runner.mjs validate validate-agent-tools-contract`
+- `node tests/runner.mjs validate validate-agent-api-contract`
+- `node tests/runner.mjs validate validate-chat-stream-contract`
+- `node tests/runner.mjs validate validate-chat-message-routing`
+- `node tests/runner.mjs validate validate-report-template-contract`
 
 Regression entrypoints:
 
-- `make backend-regression`
-- `make analysis-regression`
+- `node tests/runner.mjs backend-regression`
+- `node tests/runner.mjs analysis-regression`
 
 ## 8. Related Docs
 
