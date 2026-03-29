@@ -9,7 +9,7 @@ import {
 } from '../../../agent-runtime/legacy.js';
 import { combineDomainKeys, composeStructuralDomainPatch } from '../../../agent-runtime/domains/structural-domains.js';
 import { buildScenarioMatch, resolveLegacyStructuralStage } from '../../../agent-runtime/plugin-helpers.js';
-import { buildInteractionQuestions, normalizeNumber, normalizePositiveInteger } from '../../../agent-runtime/fallback.js';
+import { buildInteractionQuestions, computeMissingCriticalKeys, normalizeNumber, normalizePositiveInteger } from '../../../agent-runtime/fallback.js';
 import { buildDefaultReportNarrative } from '../../../agent-runtime/report-template.js';
 import type { AppLocale } from '../../../services/locale.js';
 import type {
@@ -117,9 +117,10 @@ function normalizeSectionName(raw: string): string {
 type SteelGradeProps = { E: number; G: number; nu: number; rho: number; fy: number };
 type SectionProps = { name: string; A: number; Iy: number; Iz: number; J: number; G: number };
 
-function resolveSteelGradeProps(grade: string | undefined): SteelGradeProps {
+function resolveSteelGradeProps(grade: string | undefined): SteelGradeProps & { resolvedGrade: string } {
   const normalized = normalizeSteelGrade(grade ?? 'Q355');
-  return STEEL_GRADE_PROPERTIES[normalized] ?? STEEL_GRADE_PROPERTIES['Q355'];
+  const resolved = STEEL_GRADE_PROPERTIES[normalized] ? normalized : 'Q355';
+  return { ...STEEL_GRADE_PROPERTIES[resolved]!, resolvedGrade: resolved };
 }
 
 function resolveSectionProps(
@@ -132,8 +133,8 @@ function resolveSectionProps(
     ? getDefaultColumnSection(storyCount)
     : getDefaultBeamSection(storyCount);
   const normalized = section ? normalizeSectionName(section) : defaultSection;
-  const props = H_SECTION_PROPERTIES[normalized] ?? H_SECTION_PROPERTIES[defaultSection];
-  return { name: normalized, ...props, G: matG };
+  const sectionKey = H_SECTION_PROPERTIES[normalized] ? normalized : defaultSection;
+  return { name: sectionKey, ...H_SECTION_PROPERTIES[sectionKey]!, G: matG };
 }
 
 // ─── Domain projection ───────────────────────────────────────────────────────
@@ -608,7 +609,7 @@ function n3dId(storyIdx: number, xIdx: number, yIdx: number): string {
 
 function buildFrame2dLocalModel(
   state: DraftState,
-  matProps: SteelGradeProps,
+  matProps: SteelGradeProps & { resolvedGrade: string },
   colProps: SectionProps,
   beamProps: SectionProps,
   metadata: Record<string, unknown>,
@@ -662,7 +663,7 @@ function buildFrame2dLocalModel(
     unit_system: 'SI',
     nodes,
     elements,
-    materials: [{ id: '1', name: (state.frameMaterial as string | undefined) ?? 'Q355', E: matProps.E, nu: matProps.nu, rho: matProps.rho, fy: matProps.fy }],
+    materials: [{ id: '1', name: matProps.resolvedGrade, E: matProps.E, nu: matProps.nu, rho: matProps.rho, fy: matProps.fy }],
     sections: [
       { id: '1', name: colProps.name, type: 'beam', properties: { A: colProps.A, Iy: colProps.Iy, Iz: colProps.Iz, J: colProps.J, G: colProps.G } },
       { id: '2', name: beamProps.name, type: 'beam', properties: { A: beamProps.A, Iy: beamProps.Iy, Iz: beamProps.Iz, J: beamProps.J, G: beamProps.G } },
@@ -672,7 +673,7 @@ function buildFrame2dLocalModel(
     metadata: {
       ...metadata,
       baseSupport,
-      material: (state.frameMaterial as string | undefined) ?? 'Q355',
+      material: matProps.resolvedGrade,
       columnSection: colProps.name,
       beamSection: beamProps.name,
       storyCount: storyHeights.length,
@@ -684,7 +685,7 @@ function buildFrame2dLocalModel(
 
 function buildFrame3dLocalModel(
   state: DraftState,
-  matProps: SteelGradeProps,
+  matProps: SteelGradeProps & { resolvedGrade: string },
   colProps: SectionProps,
   beamProps: SectionProps,
   metadata: Record<string, unknown>,
@@ -758,7 +759,7 @@ function buildFrame3dLocalModel(
     unit_system: 'SI',
     nodes,
     elements,
-    materials: [{ id: '1', name: (state.frameMaterial as string | undefined) ?? 'Q355', E: matProps.E, nu: matProps.nu, rho: matProps.rho, fy: matProps.fy }],
+    materials: [{ id: '1', name: matProps.resolvedGrade, E: matProps.E, nu: matProps.nu, rho: matProps.rho, fy: matProps.fy }],
     sections: [
       { id: '1', name: colProps.name, type: 'beam', properties: { A: colProps.A, Iy: colProps.Iy, Iz: colProps.Iz, J: colProps.J, G: colProps.G } },
       { id: '2', name: beamProps.name, type: 'beam', properties: { A: beamProps.A, Iy: beamProps.Iy, Iz: beamProps.Iz, J: beamProps.J, G: beamProps.G } },
@@ -768,7 +769,7 @@ function buildFrame3dLocalModel(
     metadata: {
       ...metadata,
       baseSupport,
-      material: (state.frameMaterial as string | undefined) ?? 'Q355',
+      material: matProps.resolvedGrade,
       columnSection: colProps.name,
       beamSection: beamProps.name,
       storyCount: storyHeights.length,
@@ -1081,6 +1082,8 @@ export const handler: SkillHandler = {
   },
 
   buildModel(state) {
+    const critical = computeMissingCriticalKeys(state).filter((k) => (REQUIRED_KEYS as readonly string[]).includes(k));
+    if (critical.length > 0) return undefined;
     return buildFrameLocalModel(state);
   },
 

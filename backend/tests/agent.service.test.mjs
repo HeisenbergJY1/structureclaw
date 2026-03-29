@@ -1660,4 +1660,73 @@ describe('AgentService orchestration', () => {
     expect(collecting.model?.metadata?.inferredType).toBe('frame');
     expect(Array.isArray(collecting.model?.nodes)).toBe(true);
   });
+
+  test('should parse steel grade and use it as material name in model', async () => {
+    const svc = createServiceWithDefaultSkills();
+    svc.llm = null;
+
+    const draft = await svc.textToModelDraft(
+      '2层2跨钢框架，每层3m，每跨6m，每层竖向荷载120kN，水平荷载30kN，材料Q235',
+      undefined,
+      'zh',
+    );
+
+    expect(draft.missingFields).toEqual([]);
+    expect(draft.stateToPersist?.frameMaterial).toBe('Q235');
+    const mat = draft.model?.materials?.[0];
+    expect(mat?.name).toBe('Q235');
+    expect(typeof mat?.E).toBe('number');
+    expect(typeof mat?.fy).toBe('number');
+  });
+
+  test('should fall back to Q355 properties and name when unknown grade is specified', async () => {
+    const svc = createServiceWithDefaultSkills();
+    svc.llm = null;
+
+    const draft = await svc.textToModelDraft(
+      '2层2跨钢框架，每层3m，每跨6m，每层竖向荷载120kN，水平荷载30kN，材料Q999',
+      undefined,
+      'zh',
+    );
+
+    expect(draft.missingFields).toEqual([]);
+    const mat = draft.model?.materials?.[0];
+    // Unknown grade should resolve to Q355 and name should match the used grade
+    expect(mat?.name).toBe('Q355');
+    expect(typeof mat?.E).toBe('number');
+  });
+
+  test('should use sectionKey as section name when unknown section is specified', async () => {
+    const svc = createServiceWithDefaultSkills();
+    svc.llm = null;
+
+    const draft = await svc.textToModelDraft(
+      '2层2跨框架，每层3m，每跨6m，每层竖向荷载120kN，水平荷载30kN，柱截面HW350X350',
+      undefined,
+      'zh',
+    );
+
+    expect(draft.missingFields).toEqual([]);
+    const sections = draft.model?.sections ?? [];
+    const colSec = sections[0];
+    // Section name must match a key in H_SECTION_PROPERTIES (i.e., the actually-used key)
+    expect(typeof colSec?.name).toBe('string');
+    expect(colSec?.name).not.toContain('undefined');
+    expect(typeof colSec?.properties?.A).toBe('number');
+  });
+
+  test('should parse unequal x-direction spans into bayWidthsXM', async () => {
+    const svc = createServiceWithDefaultSkills();
+    svc.llm = null;
+
+    const draft = await svc.textToModelDraft(
+      '钢框架，x向3跨跨度分别6m、9m、6m，y向1跨跨度5m，层高3.6m，层数3层，每层竖向100kN，x向水平荷载20kN',
+      undefined,
+      'zh',
+    );
+
+    expect(draft.stateToPersist?.frameDimension).toBe('3d');
+    expect(draft.stateToPersist?.bayWidthsXM).toEqual([6, 9, 6]);
+    expect(draft.stateToPersist?.bayCountX).toBe(3);
+  });
 });
