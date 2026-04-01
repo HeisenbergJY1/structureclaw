@@ -4,7 +4,9 @@ import {
   normalizeBuiltInManifestToSkillPackage,
   normalizeSkillHubCatalogEntryToSkillPackage,
 } from '../dist/skill-shared/package.js';
+import { resolveToolingForSkillManifests } from '../dist/agent-runtime/tool-registry.js';
 import { manifest as frameManifest } from '../dist/agent-skills/structure-type/frame/manifest.js';
+import { manifest as genericManifest } from '../dist/agent-skills/structure-type/generic/manifest.js';
 import { AgentSkillHubService } from '../dist/services/agent-skillhub.js';
 
 describe('shared skill package metadata', () => {
@@ -19,6 +21,8 @@ describe('shared skill package metadata', () => {
       manifest: 'manifest',
       handler: 'handler',
     });
+    expect(pkg.enabledTools).toEqual(['draft_model', 'update_model']);
+    expect(pkg.providedTools).toEqual([]);
     expect(pkg.enabledByDefault).toBe(true);
     expect(pkg.priority).toBe(70);
   });
@@ -57,6 +61,8 @@ describe('shared skill package metadata', () => {
     expect(direct.id).toBe(entry.packageMetadata.id);
     expect(direct.compatibility.skillApiVersion).toBe(entry.packageMetadata.compatibility.skillApiVersion);
     expect(direct.entrypoints).toEqual(entry.packageMetadata.entrypoints);
+    expect(direct.enabledTools).toEqual([]);
+    expect(direct.providedTools).toEqual([]);
   });
 
   test('should apply safe defaults when manifest has minimal optional fields', () => {
@@ -151,5 +157,19 @@ describe('shared skill package metadata', () => {
     expect(pkg.capabilities).toEqual([]);
     expect(pkg.supportedAnalysisTypes).toEqual([]);
     expect(pkg.materialFamilies).toEqual([]);
+  });
+
+  test('should resolve tooling from selected skill manifests', () => {
+    const tooling = resolveToolingForSkillManifests([frameManifest, genericManifest], ['generic']);
+
+    expect([...tooling.enabledToolIdsBySkill.generic].sort()).toEqual([
+      'draft_model',
+      'update_model',
+    ]);
+    expect([...tooling.tools.map((tool) => tool.id)].sort()).toEqual([
+      'draft_model',
+      'update_model',
+    ]);
+    expect(tooling.skillIdsByToolId.draft_model).toEqual(['generic']);
   });
 });

@@ -1,20 +1,38 @@
 import { ChatOpenAI } from '@langchain/openai';
 import type { AppLocale } from '../services/locale.js';
+import { buildReportDomainArtifacts } from '../agent-skills/report-export/entry.js';
+import {
+  buildCodeCheckInput,
+  executeCodeCheckDomain,
+  listCodeCheckRuleProviders,
+  resolveCodeCheckDesignCodeFromSkillIds,
+  resolveCodeCheckSkillIdForDesignCode,
+} from '../agent-skills/code-check/entry.js';
+import {
+  getBuiltinAnalysisSkill,
+  listBuiltinAnalysisSkills,
+  resolvePreferredBuiltinAnalysisSkill,
+} from '../agent-skills/analysis/entry.js';
+import type { CodeCheckClient } from '../agent-skills/code-check/rule.js';
 import { AgentSkillRegistry } from './registry.js';
 import { AgentSkillExecutor } from './executor.js';
+import { listBuiltinToolManifests, resolveToolingForSkillManifests } from './tool-registry.js';
+import { listBuiltinDomainSkillManifests } from './builtin-domain-manifests.js';
 import { buildDefaultReportNarrative } from './report-template.js';
-import { localize, withScenarioState } from './plugin-helpers.js';
+import { tryBuildGenericModelWithLlm } from '../agent-skills/structure-type/generic/llm-model-builder.js';
+import { localize, withStructuralTypeState } from './plugin-helpers.js';
 import type {
   AgentSkillBundle,
   DraftResult,
   DraftState,
   InteractionQuestion,
   SkillDefaultProposal,
-  ScenarioMatch,
+  StructuralTypeMatch,
   SkillReportNarrativeInput,
-  ScenarioSupportLevel,
-  ScenarioTemplateKey,
+  StructuralTypeSupportLevel,
+  StructuralTypeKey,
   SkillManifest,
+  ToolManifest,
 } from './types.js';
 
 export type {
@@ -31,13 +49,14 @@ export type {
   FrameDimension,
   InferredModelType,
   InteractionQuestion,
-  ScenarioMatch,
-  ScenarioTemplateKey,
-  ScenarioSupportLevel,
+  StructuralTypeMatch,
+  StructuralTypeKey,
+  StructuralTypeSupportLevel,
   SkillDefaultProposal,
   SkillHandler,
   SkillManifest,
   SkillReportNarrativeInput,
+  ToolManifest,
 } from './types.js';
 
 export class AgentSkillRuntime {
@@ -53,28 +72,277 @@ export class AgentSkillRuntime {
 
   async listSkillManifests(): Promise<SkillManifest[]> {
     const plugins = await this.registry.listPlugins();
-    return plugins.map((plugin) => plugin.manifest);
+    return [
+      ...plugins.map((plugin) => plugin.manifest),
+      ...listBuiltinDomainSkillManifests(),
+    ];
   }
 
-  async detectScenario(message: string, locale: AppLocale, currentState?: DraftState, skillIds?: string[]): Promise<ScenarioMatch> {
-    return this.registry.detectScenario(message, locale, currentState, skillIds);
+  listBuiltinToolManifests(): ToolManifest[] {
+    return listBuiltinToolManifests();
   }
 
-  async shouldPreferExecute(
-    message: string,
-    locale: AppLocale,
-    currentState?: DraftState,
-    skillIds?: string[],
-  ): Promise<boolean> {
-    const scenario = await this.registry.detectScenario(message, locale, currentState, skillIds);
-    if (scenario.supportLevel === 'unsupported') {
-      return false;
+  async listToolManifests(skillIds?: string[]): Promise<ToolManifest[]> {
+    const manifests = await this.listSkillManifests();
+    return resolveToolingForSkillManifests(manifests, skillIds).tools;
+  }
+
+  async resolveSkillTooling(skillIds?: string[]) {
+    const manifests = await this.listSkillManifests();
+    return resolveToolingForSkillManifests(manifests, skillIds);
+  }
+
+  listAnalysisSkillIds(): string[] {
+    return listBuiltinAnalysisSkills().map((skill) => skill.id);
+  }
+
+  listCodeCheckSkillIds(): string[] {
+    return listCodeCheckRuleProviders().map((provider) => provider.id);
+  }
+
+  isAnalysisSkillId(skillId: string | undefined): boolean {
+    return typeof skillId === 'string' && this.listAnalysisSkillIds().includes(skillId);
+  }
+
+  isCodeCheckSkillId(skillId: string | undefined): boolean {
+    return typeof skillId === 'string' && this.listCodeCheckSkillIds().includes(skillId);
+  }
+
+  resolveCodeCheckDesignCodeFromSkillIds(skillIds?: string[]): string | undefined {
+    return resolveCodeCheckDesignCodeFromSkillIds(skillIds);
+  }
+
+  resolveCodeCheckSkillId(designCode: string | undefined): string | undefined {
+    return resolveCodeCheckSkillIdForDesignCode(designCode);
+  }
+
+  resolvePreferredAnalysisSkill(options?: {
+    analysisType?: 'static' | 'dynamic' | 'seismic' | 'nonlinear';
+    engineId?: string;
+    skillIds?: string[];
+    supportedModelFamilies?: string[];
+  }) {
+    return resolvePreferredBuiltinAnalysisSkill(options);
+  }
+
+  async executeAnalysisSkill(options: {
+    traceId: string;
+    analysisType: 'static' | 'dynamic' | 'seismic' | 'nonlinear';
+    engineId?: string;
+    model: Record<string, unknown>;
+    parameters: Record<string, unknown>;
+    analysisSkillId?: string;
+    skillIds?: string[];
+    supportedModelFamilies?: string[];
+    postToEngineWithRetry: (
+      path: string,
+      input: Record<string, unknown>,
+      retryOptions: { retries: number; traceId: string; tool: 'run_analysis' },
+    ) => Promise<{ data: unknown }>;
+  }): Promise<{
+    input: {
+      type: 'static' | 'dynamic' | 'seismic' | 'nonlinear';
+      engineId?: string;
+      model: Record<string, unknown>;
+      parameters: Record<string, unknown>;
+    };
+    result: Record<string, unknown>;
+    skillId?: string;
+  }> {
+    const selectedSkill = (typeof options.analysisSkillId === 'string' && options.analysisSkillId.trim().length > 0)
+      ? getBuiltinAnalysisSkill(options.analysisSkillId)
+      : resolvePreferredBuiltinAnalysisSkill({
+        analysisType: options.analysisType,
+        engineId: options.engineId,
+        skillIds: options.skillIds,
+        supportedModelFamilies: options.supportedModelFamilies,
+      });
+
+    const input = {
+      type: options.analysisType,
+      engineId: options.engineId,
+      model: options.model,
+      parameters: options.parameters,
+    };
+    const analyzed = await options.postToEngineWithRetry('/analyze', input, {
+      retries: 2,
+      traceId: options.traceId,
+      tool: 'run_analysis',
+    });
+    const result = (analyzed?.data ?? {}) as Record<string, unknown>;
+    const existingMeta = result.meta && typeof result.meta === 'object'
+      ? result.meta as Record<string, unknown>
+      : {};
+    if (selectedSkill) {
+      result.meta = {
+        ...existingMeta,
+        analysisSkillId: selectedSkill.id,
+        analysisSkillIds: [selectedSkill.id],
+        analysisAdapterKey: selectedSkill.adapterKey,
+        analysisType: options.analysisType,
+      };
+    } else if (result.meta === undefined && Object.keys(existingMeta).length > 0) {
+      result.meta = existingMeta;
     }
-    return scenario.mappedType !== 'unknown';
+    return {
+      input,
+      result,
+      skillId: selectedSkill?.id,
+    };
   }
 
-  async getScenarioLabel(key: string, locale: AppLocale, skillIds?: string[]): Promise<string> {
-    return this.registry.getScenarioLabel(key, locale, skillIds);
+  async executeCodeCheckSkill(options: {
+    codeCheckClient: CodeCheckClient | unknown;
+    traceId: string;
+    designCode: string;
+    model: Record<string, unknown>;
+    analysis: unknown;
+    analysisParameters: Record<string, unknown>;
+    codeCheckElements?: string[];
+    engineId?: string;
+    codeCheckSkillId?: string;
+  }): Promise<{
+    input: Record<string, unknown>;
+    result: unknown;
+    skillId?: string;
+  }> {
+    const skillId = (typeof options.codeCheckSkillId === 'string' && options.codeCheckSkillId.trim().length > 0)
+      ? options.codeCheckSkillId
+      : resolveCodeCheckSkillIdForDesignCode(options.designCode);
+    const input = buildCodeCheckInput({
+      traceId: options.traceId,
+      designCode: options.designCode,
+      model: options.model,
+      analysis: options.analysis,
+      analysisParameters: options.analysisParameters,
+      codeCheckElements: options.codeCheckElements,
+    });
+    const result = await executeCodeCheckDomain(options.codeCheckClient as CodeCheckClient, input, options.engineId);
+    if (result && typeof result === 'object' && skillId) {
+      const payload = result as Record<string, unknown>;
+      const existingMeta = payload.meta && typeof payload.meta === 'object'
+        ? payload.meta as Record<string, unknown>
+        : {};
+      payload.meta = {
+        ...existingMeta,
+        codeCheckSkillId: skillId,
+      };
+    }
+    return {
+      input,
+      result,
+      skillId,
+    };
+  }
+
+  async executeValidationSkill(options: {
+    model: Record<string, unknown>;
+    engineId?: string;
+    structureProtocolClient: {
+      post: (path: string, payload: Record<string, unknown>) => Promise<{ data: unknown }>;
+    };
+  }): Promise<{
+    input: { model: Record<string, unknown> };
+    result: Record<string, unknown>;
+    skillId: 'validation-structure-model';
+  }> {
+    const input = { model: options.model };
+    const validated = await options.structureProtocolClient.post('/validate', {
+      model: options.model,
+      engineId: options.engineId,
+    });
+    return {
+      input,
+      result: (validated?.data ?? {}) as Record<string, unknown>,
+      skillId: 'validation-structure-model',
+    };
+  }
+
+  async executeReportSkill(options: {
+    message: string;
+    analysisType: 'static' | 'dynamic' | 'seismic' | 'nonlinear';
+    analysis: unknown;
+    codeCheck?: unknown;
+    format: 'json' | 'markdown' | 'both';
+    locale: AppLocale;
+    draft?: DraftState;
+    skillIds?: string[];
+  }): Promise<{
+    report: { summary: string; json: Record<string, unknown>; markdown?: string };
+    skillId: 'report-export-builtin';
+  }> {
+    const analysisSuccess = Boolean((options.analysis as { success?: unknown } | undefined)?.success);
+    const codeCheckSummary = (options.codeCheck as { summary?: Record<string, unknown> } | undefined)?.summary;
+    const codeCheckText = codeCheckSummary
+      ? (options.locale === 'zh'
+        ? `校核通过 ${String(codeCheckSummary.passed ?? 0)} / ${String(codeCheckSummary.total ?? 0)}`
+        : `Code checks passed ${String(codeCheckSummary.passed ?? 0)} / ${String(codeCheckSummary.total ?? 0)}`)
+      : (options.locale === 'zh' ? '未执行规范校核' : 'No code checks were executed');
+    const summary = options.locale === 'zh'
+      ? `分析类型 ${options.analysisType}，分析${analysisSuccess ? '成功' : '失败'}，${codeCheckText}。`
+      : `Analysis type ${options.analysisType}; analysis ${analysisSuccess ? 'succeeded' : 'failed'}; ${codeCheckText}.`;
+    const {
+      keyMetrics,
+      clauseTraceability,
+      controllingCases,
+      visualizationHints,
+    } = buildReportDomainArtifacts(options.analysis, options.codeCheck);
+    const jsonReport: Record<string, unknown> = {
+      reportSchemaVersion: '1.0.0',
+      intent: options.message,
+      analysisType: options.analysisType,
+      summary,
+      keyMetrics,
+      clauseTraceability,
+      controllingCases,
+      visualizationHints,
+      analysis: options.analysis,
+      codeCheck: options.codeCheck,
+      generatedAt: new Date().toISOString(),
+      meta: {
+        reportSkillId: 'report-export-builtin',
+      },
+    };
+
+    if (options.format === 'json') {
+      return {
+        report: {
+          summary,
+          json: jsonReport,
+        },
+        skillId: 'report-export-builtin',
+      };
+    }
+
+    const markdown = await this.buildReportNarrative({
+      message: options.message,
+      analysisType: options.analysisType,
+      analysisSuccess,
+      codeCheckText,
+      summary,
+      keyMetrics,
+      clauseTraceability,
+      controllingCases,
+      visualizationHints,
+      locale: options.locale,
+    }, options.draft, options.skillIds);
+
+    return {
+      report: {
+        summary,
+        json: jsonReport,
+        markdown: options.format === 'both' || options.format === 'markdown' ? markdown : undefined,
+      },
+      skillId: 'report-export-builtin',
+    };
+  }
+
+  async detectStructuralType(message: string, locale: AppLocale, currentState?: DraftState, skillIds?: string[]): Promise<StructuralTypeMatch> {
+    return this.registry.detectStructuralType(message, locale, currentState, skillIds);
+  }
+
+  async getStructuralTypeLabel(key: string, locale: AppLocale, skillIds?: string[]): Promise<string> {
+    return this.registry.getStructuralTypeLabel(key, locale, skillIds);
   }
 
   async applyProvidedValues(
@@ -103,8 +371,8 @@ export class AgentSkillRuntime {
     return {
       ...merged,
       skillId: plugin.id,
-      scenarioKey: (merged.scenarioKey ?? plugin.id) as ScenarioTemplateKey,
-      supportLevel: (merged.supportLevel ?? 'supported') as ScenarioSupportLevel,
+      structuralTypeKey: (merged.structuralTypeKey ?? plugin.id) as StructuralTypeKey,
+      supportLevel: (merged.supportLevel ?? 'supported') as StructuralTypeSupportLevel,
       updatedAt: Date.now(),
     };
   }
@@ -116,32 +384,32 @@ export class AgentSkillRuntime {
     locale: AppLocale,
     skillIds?: string[]
   ): Promise<DraftResult> {
-    const scenario = await this.registry.detectScenario(message, locale, existingState, skillIds);
-    if (scenario.mappedType === 'unknown' || !scenario.skillId) {
+    const structuralTypeMatch = await this.registry.detectStructuralType(message, locale, existingState, skillIds);
+    if (!structuralTypeMatch.skillId) {
       const stateToPersist: DraftState = {
         ...(existingState || { inferredType: 'unknown' }),
-        scenarioKey: scenario.key,
-        supportLevel: scenario.supportLevel,
-        supportNote: scenario.supportNote,
+        structuralTypeKey: structuralTypeMatch.key,
+        supportLevel: structuralTypeMatch.supportLevel,
+        supportNote: structuralTypeMatch.supportNote,
         updatedAt: Date.now(),
       };
       return {
         inferredType: 'unknown',
         missingFields: ['inferredType'],
-        extractionMode: 'rule-based',
+        extractionMode: 'deterministic',
         stateToPersist,
-        scenario,
+        structuralTypeMatch,
       };
     }
 
-    const plugin = await this.registry.resolvePluginForIdentifier(scenario.skillId, skillIds);
+    const plugin = await this.registry.resolvePluginForIdentifier(structuralTypeMatch.skillId, skillIds);
     if (!plugin) {
       return {
         inferredType: existingState?.inferredType || 'unknown',
         missingFields: ['inferredType'],
-        extractionMode: 'rule-based',
+        extractionMode: 'deterministic',
         stateToPersist: existingState,
-        scenario,
+        structuralTypeMatch,
       };
     }
 
@@ -157,32 +425,43 @@ export class AgentSkillRuntime {
       locale,
       currentState: existingState,
       llmDraftPatch: execution.draftPatch,
-      scenario,
+      structuralTypeMatch,
     });
-    const nextState = withScenarioState(plugin.handler.mergeState(existingState, patch), scenario);
-    const missing = plugin.handler.computeMissing(nextState, 'execute');
-    const model = missing.critical.length === 0 ? plugin.handler.buildModel(nextState) : undefined;
+    const nextState = withStructuralTypeState(plugin.handler.mergeState(existingState, patch), structuralTypeMatch);
+    const missing = plugin.handler.computeMissing(nextState, 'execution');
+    let model = missing.critical.length === 0 ? plugin.handler.buildModel(nextState) : undefined;
+    let missingFields = [...missing.critical];
+    if (!model && plugin.id === 'generic') {
+      const llmBuiltModel = await tryBuildGenericModelWithLlm(llm, message, nextState, locale);
+      if (llmBuiltModel) {
+        model = llmBuiltModel;
+        missingFields = [];
+      }
+    }
     return {
       inferredType: nextState.inferredType,
-      missingFields: missing.critical,
+      missingFields,
       model,
-      extractionMode: execution.draftPatch ? 'llm' : 'rule-based',
+      extractionMode: plugin.id === 'generic' || execution.draftPatch ? 'llm' : 'deterministic',
       stateToPersist: nextState,
-      scenario,
+      structuralTypeMatch,
     };
   }
 
   async assessDraft(
     state: DraftState,
     locale: AppLocale,
-    mode: 'chat' | 'execute',
+    phase: 'interactive' | 'execution',
     skillIds?: string[],
   ): Promise<{ criticalMissing: string[]; optionalMissing: string[] }> {
     const plugin = await this.registry.resolvePluginForState(state, skillIds);
-    if (!plugin || state.inferredType === 'unknown') {
+    if (!plugin) {
       return { criticalMissing: ['inferredType'], optionalMissing: [] };
     }
-    const missing = plugin.handler.computeMissing(state, mode);
+    if (state.inferredType === 'unknown' && state.skillId !== plugin.id) {
+      return { criticalMissing: ['inferredType'], optionalMissing: [] };
+    }
+    const missing = plugin.handler.computeMissing(state, phase);
     return {
       criticalMissing: missing.critical,
       optionalMissing: missing.optional,

@@ -7,14 +7,13 @@
 
 ### Agent 执行
 
-- `POST /api/v1/agent/run` — 模式：`chat`、`execute`、`auto`
+- `POST /api/v1/agent/run` — chat-first 编排入口
 - 链路：`text-to-model-draft -> convert -> validate -> analyze -> code-check -> report`
 
 ### Chat 与流式
 
 - `POST /api/v1/chat/message`
 - `POST /api/v1/chat/stream`
-- `POST /api/v1/chat/execute`
 
 流式事件：`start` → `interaction_update`（可选）→ `result` → `done`（或 `error`）。
 
@@ -35,6 +34,19 @@
 - `POST /api/v1/agent/skillhub/disable`
 - `POST /api/v1/agent/skillhub/uninstall`
 
+### 当前阶段能力边界（2026-04）
+
+- 当前 skill：全部按内置 skill 运行。
+- 外接 skill：指 SkillHub 技能包；该通道为预留能力，尚未投入生产执行链。
+- 当前 tool：统一按外接 tool 治理。
+- 内置 tool：指平台基础能力（如 read/write）；该通道当前为预留能力。
+
+优先级规则：
+
+- 用户手动开关（skill/tool enable/disable）优先级最高。
+- 手动开关覆盖自动激活、默认集合与策略建议。
+- 用户手动关闭的 skill 或 tool 必须立即失效，不允许被编排器调用。
+
 ## 校验命令
 
 所有校验通过 `node tests/runner.mjs validate <name>` 执行。完整列表：`node tests/runner.mjs validate --list`。
@@ -42,7 +54,7 @@
 ### Agent 编排与协议
 
 - `validate-agent-orchestration`
-- `validate-agent-no-skill-fallback`
+- `validate-agent-base-chat-fallback`
 - `validate-agent-tools-contract`
 - `validate-agent-api-contract`
 - `validate-agent-capability-matrix`
@@ -74,7 +86,7 @@
 ### 校核、报告与 Schema
 
 - `validate-code-check-traceability`
-- `validate-report-template-contract`
+- `validate-report-narrative-contract`
 - `validate-schema-migration`
 
 ### 回归
