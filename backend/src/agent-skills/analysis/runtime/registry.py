@@ -34,6 +34,18 @@ ENGINE_DEFAULTS = {
         "routingHints": ["fallback", "fast"],
         "constraints": {},
     },
+    "builtin-pkpm": {
+        "name": "PKPM Builtin",
+        "priority": 90,
+        "routingHints": ["commercial", "design-code"],
+        "constraints": {"requiresPKPM": True},
+    },
+    "builtin-yjk": {
+        "name": "YJK Builtin",
+        "priority": 85,
+        "routingHints": ["commercial", "design-code"],
+        "constraints": {"requiresYJK": True},
+    },
 }
 
 
@@ -405,8 +417,13 @@ class AnalysisEngineRegistry:
     def _get_engine_unavailable_reason(self, manifest: Dict[str, Any]) -> Optional[str]:
         if not manifest.get("enabled", True):
             return "Engine is disabled"
-        if manifest["kind"] == "python" and manifest.get("constraints", {}).get("requiresOpenSees"):
+        constraints = manifest.get("constraints", {})
+        if manifest["kind"] == "python" and constraints.get("requiresOpenSees"):
             return self._opensees_unavailable_reason()
+        if manifest["kind"] == "python" and constraints.get("requiresPKPM"):
+            return self._pkpm_unavailable_reason()
+        if manifest["kind"] == "python" and constraints.get("requiresYJK"):
+            return self._yjk_unavailable_reason()
         if manifest["kind"] == "http":
             base_url = manifest.get("baseUrl")
             if not isinstance(base_url, str) or not base_url.strip():
@@ -482,6 +499,22 @@ class AnalysisEngineRegistry:
         logger.warning("OpenSeesPy runtime is unavailable: %s", reason)
         self._opensees_runtime_reason = str(reason)
         return self._opensees_runtime_reason
+
+    def _pkpm_unavailable_reason(self) -> Optional[str]:
+        cycle_path = os.getenv("PKPM_CYCLE_PATH", "").strip()
+        if not cycle_path:
+            return "PKPM is not configured (PKPM_CYCLE_PATH not set)"
+        if not Path(cycle_path).exists():
+            return f"PKPM cycle executable not found at {cycle_path}"
+        return None
+
+    def _yjk_unavailable_reason(self) -> Optional[str]:
+        yjk_path = os.getenv("YJK_PATH", "").strip()
+        if not yjk_path:
+            return "YJK is not configured (YJK_PATH not set)"
+        if not Path(yjk_path).exists():
+            return f"YJK installation not found at {yjk_path}"
+        return None
 
     def _builtin_manifests(self) -> List[Dict[str, Any]]:
         manifests: List[Dict[str, Any]] = []
