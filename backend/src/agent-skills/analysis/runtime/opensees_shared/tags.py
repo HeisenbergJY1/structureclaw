@@ -1,22 +1,22 @@
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any
 
-from opensees_static_analysis import OpenSeesStaticExecutor
-from opensees_static_simplified_static_analysis import StaticAnalyzer
 from structure_protocol.structure_model_v1 import StructureModelV1
 
 
-class OpenSeesStaticAnalyzer(StaticAnalyzer):
-    """Bridges StructureModelV1 node/element IDs to OpenSees integer tags.
+class OpenSeesTagMapper:
+    """Maps V1 string IDs to OpenSees integer tags.
 
-    Inherits StaticAnalyzer (from the opensees-static library) which owns the
-    bulk of the static analysis logic; this subclass only overrides the tag
-    look-up methods required by OpenSeesPy.
+    Replaces the duplicated OpenSeesModelAdapter classes that were defined
+    separately in opensees-dynamic/runtime.py and opensees-seismic/runtime.py.
+    Exposes the same interface (_ops_node_tag / _ops_element_tag / _ops_material_tag)
+    so existing executor classes (OpenSeesDynamicExecutor, OpenSeesSeismicExecutor)
+    continue to work without modification.
     """
 
     def __init__(self, model: StructureModelV1) -> None:
-        super().__init__(model)
+        self.model = model
         self._ops_node_tags = {
             str(node.id): index + 1 for index, node in enumerate(model.nodes)
         }
@@ -44,19 +44,3 @@ class OpenSeesStaticAnalyzer(StaticAnalyzer):
         if key not in self._ops_material_tags:
             raise ValueError(f"Unknown material id '{material_id}' in OpenSees mapping")
         return self._ops_material_tags[key]
-
-    def _select_opensees_planar_frame_mode(self, parameters: Dict[str, Any]) -> Any:
-        return self._select_planar_frame_mode(parameters)
-
-
-def run_analysis(model: StructureModelV1, parameters: Dict[str, Any]) -> Dict[str, Any]:
-    analyzer = OpenSeesStaticAnalyzer(model)
-    executor = OpenSeesStaticExecutor(analyzer)
-    try:
-        import openseespy.opensees as ops  # noqa: F401
-    except Exception as error:
-        raise RuntimeError("OpenSeesPy is not available for the requested engine") from error
-    try:
-        return executor.run(parameters)
-    except Exception as error:
-        raise RuntimeError(f"OpenSees static analysis failed: {error}") from error
