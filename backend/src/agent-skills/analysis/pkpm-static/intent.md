@@ -13,7 +13,7 @@ triggers: ["PKPM 静力分析", "PKPM 计算", "SATWE", "pkpm static", "pkpm ana
 stages: ["analysis"]
 capabilities: ["analysis-policy", "analysis-execution"]
 supportedModelFamilies: ["frame", "generic"]
-autoLoadByDefault: false
+autoLoadByDefault: true
 runtimeRelativePath: runtime.py
 ---
 # PKPM Static Analysis
