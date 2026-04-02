@@ -19,11 +19,6 @@ def build_success_result(
     )
 
 
-def build_error_result(message: str) -> AnalysisResult:
-    """Construct a normalised error AnalysisResult (use only when raising is not possible)."""
-    return AnalysisResult(
-        status="error",
-        summary={"error": message},
-        detailed={},
-        warnings=[],
-    )
+def raise_analysis_error(message: str) -> None:
+    """Signal an analysis error by raising, so the registry can trigger fallback selection."""
+    raise RuntimeError(message)

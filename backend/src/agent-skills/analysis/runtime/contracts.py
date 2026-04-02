@@ -24,10 +24,12 @@ class AnalysisResult(TypedDict, total=False):
 
     status="success"  → detailed contains computed results; warnings may be non-empty.
     status="partial"  → computation completed with degraded fidelity; warnings explain why.
-    status="error"    → analysis failed; summary["error"] contains the message.
+
+    Failures must raise RuntimeError (or EngineNotAvailableError), NOT return
+    a result dict.  The registry relies on exceptions to trigger fallback.
     """
 
-    status: Literal["success", "partial", "error"]
+    status: Literal["success", "partial"]
     summary: Dict[str, Any]
     detailed: Dict[str, Any]
     warnings: List[str]
@@ -37,7 +39,9 @@ class AnalysisResult(TypedDict, total=False):
 class EngineNotAvailableError(RuntimeError):
     """Raised when an engine cannot be used (not installed, licence expired, etc.).
 
-    registry.py catches this and attempts a fallback engine before surfacing HTTP 503.
+    As a RuntimeError subclass, this is caught by registry.py's generic
+    exception handler which attempts a fallback engine.  If no fallback
+    succeeds, the error propagates to the API layer as a normal failure.
     """
 
     def __init__(self, engine: str, reason: str) -> None:

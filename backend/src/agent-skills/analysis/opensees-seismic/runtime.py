@@ -20,10 +20,15 @@ def run_analysis(model: StructureModelV1, parameters: Dict[str, Any]) -> Dict[st
         analyzer = SimplifiedSeismicAnalyzer(model)
         try:
             import openseespy.opensees as ops  # noqa: F401
+        except ImportError as error:
+            raise RuntimeError(
+                "Response spectrum analysis requires OpenSeesPy"
+            ) from error
+        try:
             modes = executor.get_modes(ops)
         except Exception as error:
             raise RuntimeError(
-                f"Response spectrum analysis requires OpenSeesPy: {error}"
+                f"Failed to compute modal data: {error}"
             ) from error
 
         result = build_simplified_response_spectrum_result(analyzer, parameters)
@@ -39,6 +44,11 @@ def run_analysis(model: StructureModelV1, parameters: Dict[str, Any]) -> Dict[st
     if method == "pushover":
         try:
             import openseespy.opensees as ops  # noqa: F401
+        except ImportError as error:
+            raise RuntimeError(
+                "Pushover analysis requires OpenSeesPy"
+            ) from error
+        try:
             return executor.pushover_analysis(
                 parameters.get("targetDisplacement", 0.5),
                 parameters.get("controlNode"),
