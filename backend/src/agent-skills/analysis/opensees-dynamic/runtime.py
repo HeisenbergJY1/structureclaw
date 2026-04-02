@@ -13,9 +13,10 @@ def run_analysis(model: StructureModelV1, parameters: Dict[str, Any]) -> Dict[st
     executor = OpenSeesDynamicExecutor(helper)
 
     try:
-        import openseespy.opensees as ops  # noqa: F401
+        import openseespy.opensees as ops
     except Exception as error:
-        raise RuntimeError("OpenSeesPy is not available for the requested engine") from error
+        from contracts import EngineNotAvailableError
+        raise EngineNotAvailableError("builtin-opensees", f"OpenSeesPy is not available: {error}") from error
 
     if analysis_type == "modal":
         num_modes = parameters.get("numModes", 10)
