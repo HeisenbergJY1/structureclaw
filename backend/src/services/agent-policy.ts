@@ -58,11 +58,17 @@ export class AgentPolicyService {
       '开始分析',
       '运行分析',
       '直接分析',
+      '启动分析',
+      '触发分析',
+      '触发计算',
       '开始计算',
       '运行计算',
       '执行计算',
+      '启动计算',
       '开始求解',
       '运行求解',
+      'yjk计算',
+      '盈建科计算',
       '分析这个模型',
       'run analysis',
       'start analysis',
@@ -71,6 +77,8 @@ export class AgentPolicyService {
       'analyze this model',
       'solve this model',
       'calculate the result',
+      'run yjk',
+      'start yjk',
     ].some((pattern) => text.includes(pattern));
   }
 
