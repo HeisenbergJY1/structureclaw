@@ -84,10 +84,39 @@ def _find_yjks_exe(root: str) -> str | None:
     return None
 
 
-def _run_cmd(cmd: str, arg: str = "") -> None:
+def _run_cmd(cmd: str, arg: str = "") -> bool:
+    """Execute a YJK command and return success status.
+
+    Returns True if the command succeeded, False if YJK is no longer running.
+    """
     from YJKAPI import YJKSControl
     print(f"[yjk_driver] RunCmd({cmd!r}, {arg!r})", file=sys.stderr, flush=True)
-    YJKSControl.RunCmd(cmd, arg)
+    try:
+        YJKSControl.RunCmd(cmd, arg)
+        # Check if YJK is still running after the command
+        if not _is_yjk_running():
+            print(f"[yjk_driver] WARNING: YJK process terminated after {cmd}", file=sys.stderr, flush=True)
+            return False
+        return True
+    except Exception as exc:
+        print(f"[yjk_driver] ERROR in RunCmd({cmd}): {exc}", file=sys.stderr, flush=True)
+        return False
+
+
+def _is_yjk_running() -> bool:
+    """Check if the YJK process is still running."""
+    import subprocess
+    try:
+        # Use tasklist to check if yjks.exe is running
+        result = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq yjks.exe"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return "yjks.exe" in result.stdout.lower()
+    except Exception:
+        return True  # Assume running if we can't check
 
 
 def _collect_out_files(work_dir: str) -> str:
@@ -188,27 +217,53 @@ def _run(model_path: str, work_dir: str, yjks_root: str) -> int:
 
     print(f"[yjk_driver] Phase 3: project = {yjk_project}", file=sys.stderr, flush=True)
     if os.path.isfile(yjk_project):
-        _run_cmd("UIOpen", yjk_project)
+        if not _run_cmd("UIOpen", yjk_project):
+            _error("YJK crashed while opening project")
+            return 1
     else:
-        _run_cmd("UINew", yjk_project)
+        if not _run_cmd("UINew", yjk_project):
+            _error("YJK crashed while creating new project")
+            return 1
 
-    _run_cmd("yjk_importydb", ydb_path)
+    if not _run_cmd("yjk_importydb", ydb_path):
+        _error("YJK crashed while importing YDB file - the model may have invalid geometry or sections")
+        return 1
 
     # -- Phase 4: Model preparation (exact three_story_steel_frame.py) --
     print("[yjk_driver] Phase 4: model repair / prep", file=sys.stderr, flush=True)
-    _run_cmd("yjk_repair")
-    _run_cmd("yjk_save")
-    _run_cmd("yjk_formslab_alllayer")
-    _run_cmd("yjk_setlayersupport")
+    if not _run_cmd("yjk_repair"):
+        _error("YJK crashed during model repair")
+        return 1
+    if not _run_cmd("yjk_save"):
+        _error("YJK crashed during save")
+        return 1
+    if not _run_cmd("yjk_formslab_alllayer"):
+        _error("YJK crashed during slab formation")
+        return 1
+    if not _run_cmd("yjk_setlayersupport"):
+        _error("YJK crashed during layer support setup")
+        return 1
 
     # -- Phase 5: Preprocessing + full analysis -------------------------
     print("[yjk_driver] Phase 5: preprocessing + calculation", file=sys.stderr, flush=True)
-    _run_cmd("yjkspre_genmodrel")
-    _run_cmd("yjktransload_tlplan")
-    _run_cmd("yjktransload_tlvert")
-    _run_cmd("SetCurrentLabel", "IDSPRE_ROOT")
-    _run_cmd("yjkdesign_dsncalculating_all")
-    _run_cmd("SetCurrentLabel", "IDDSN_DSP")
+    if not _run_cmd("yjkspre_genmodrel"):
+        _error("YJK crashed during model relation generation")
+        return 1
+    if not _run_cmd("yjktransload_tlplan"):
+        _error("YJK crashed during plan load transfer")
+        return 1
+    if not _run_cmd("yjktransload_tlvert"):
+        _error("YJK crashed during vertical load transfer")
+        return 1
+    if not _run_cmd("SetCurrentLabel", "IDSPRE_ROOT"):
+        _error("YJK crashed during label switch")
+        return 1
+    if not _run_cmd("yjkdesign_dsncalculating_all"):
+        _error("YJK crashed during design calculation - this often happens when the model has no valid structural data or missing sections")
+        return 1
+    if not _run_cmd("SetCurrentLabel", "IDDSN_DSP"):
+        _error("YJK crashed during final label switch")
+        return 1
 
     print("[yjk_driver] Phase 5 complete: analysis finished", file=sys.stderr, flush=True)
 

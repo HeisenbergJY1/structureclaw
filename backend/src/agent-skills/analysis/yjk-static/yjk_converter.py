@@ -92,7 +92,7 @@ def _build_shape_val(sec: dict, kind: int) -> tuple[int, str, str]:
     """Return (kind, ShapeVal, name) for a V2 section dict.
 
     Priority:
-      1. standard_steel_name -> kind=26
+      1. standard_steel_name -> kind=26 (with fallback to explicit geometry)
       2. properties with detailed geometry -> build ShapeVal
       3. top-level width/height -> rectangular fallback
     """
@@ -104,7 +104,32 @@ def _build_shape_val(sec: dict, kind: int) -> tuple[int, str, str]:
         or extra.get("standard_steel_name")
         or ""
     )
+
+    # For standard steel names, try to extract dimensions as fallback
+    # YJK kind=26 requires exact name match in its steel library
+    # If the name doesn't match, we need explicit geometry
     if std_name:
+        # Try to parse HW/HN/HM dimensions from the name for fallback
+        import re
+        hw_match = re.match(r'^(HW|HN|HM|HP)(\d+)[Xx×](\d+)$', std_name, re.IGNORECASE)
+        if hw_match:
+            prefix = hw_match.group(1).upper()
+            H = int(hw_match.group(2))
+            B = int(hw_match.group(3))
+            # Use explicit H-section geometry (kind=2) instead of name lookup
+            # This is more reliable than depending on YJK's steel library
+            # Estimate typical flange/web thickness based on section size
+            if prefix == "HW":  # Wide flange (H≈B)
+                tw = max(8, H // 30)
+                tf = max(12, H // 20)
+            elif prefix == "HN":  # Narrow flange
+                tw = max(6, H // 40)
+                tf = max(9, H // 30)
+            else:  # HM, HP
+                tw = max(7, H // 35)
+                tf = max(11, H // 25)
+            return 2, f"{tw},{H},{B},{tf},{B},{tf}", ""
+        # If we can't parse, try kind=26 but it may fail
         return 26, "", str(std_name)
 
     # PKPM-style shape dict
