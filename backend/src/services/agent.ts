@@ -1026,100 +1026,111 @@ export class AgentService {
   }
 
   private inferSkillDrivenToolDecision(args: {
-    message: string;
-    locale: AppLocale;
-    activeToolIds?: ActiveToolSet;
-    modelInput?: Record<string, unknown>;
-    prefetchedDraft?: SkillFirstDraftSnapshot;
-    workingSession: InteractionSession;
-  }): SkillDrivenToolDecision | null {
-    const {
-      message,
-      locale,
-      activeToolIds,
-      modelInput,
-      prefetchedDraft,
-      workingSession,
-    } = args;
-    const hasModel = Boolean(modelInput || prefetchedDraft?.draft.model || workingSession.latestModel);
-    const asksUpdate = /(改成|改为|修改|更新|change\s+to|update|revise)/i.test(message);
-    const asksModeling = /(设计|建模|模型|model|draft|design)/i.test(message);
-    const asksFreshModel = /(重新|重建|从头|新建|全新|new|fresh|scratch|from\s+scratch)/i.test(message);
-    const asksRunAnalysis = /(分析|analysis|analy[sz]e|analyze|验算|计算)/i.test(message);
-    const asksCodeCheck = /(规范|校核|code\s*check|compliance)/i.test(message);
-    const asksReport = /(报告|report|导出|export)/i.test(message);
+      message: string;
+      locale: AppLocale;
+      activeToolIds?: ActiveToolSet;
+      modelInput?: Record<string, unknown>;
+      prefetchedDraft?: SkillFirstDraftSnapshot;
+      workingSession: InteractionSession;
+    }): SkillDrivenToolDecision | null {
+      const {
+        message,
+        locale,
+        activeToolIds,
+        modelInput,
+        prefetchedDraft,
+        workingSession,
+      } = args;
+      const hasModel = Boolean(modelInput || prefetchedDraft?.draft.model || workingSession.latestModel);
+      const asksUpdate = /(改成|改为|修改|更新|change\s+to|update|revise)/i.test(message);
+      const asksModeling = /(设计|建模|模型|model|draft|design)/i.test(message);
+      const asksFreshModel = /(重新|重建|从头|新建|全新|new|fresh|scratch|from\s+scratch)/i.test(message);
+      const asksRunAnalysis = /(分析|analysis|analy[sz]e|analyze|验算|计算)/i.test(message);
+      const asksCodeCheck = /(规范|校核|code\s*check|compliance)/i.test(message);
+      const asksReport = /(报告|report|导出|export)/i.test(message);
+      const asksExecutionTrigger = this.policy.inferExecutionIntent(message);
 
-    if (hasModel && asksUpdate && this.hasActiveTool(activeToolIds, 'update_model')) {
-      return {
-        toolId: 'update_model',
-        reason: this.localize(locale, '命中模型修改意图，优先走 update_model', 'Detected model-update intent; prefer update_model'),
-      };
+      if (hasModel && asksUpdate && this.hasActiveTool(activeToolIds, 'update_model')) {
+        return {
+          toolId: 'update_model',
+          reason: this.localize(locale, '命中模型修改意图，优先走 update_model', 'Detected model-update intent; prefer update_model'),
+        };
+      }
+
+      if (prefetchedDraft?.draft.model && this.hasActiveTool(activeToolIds, 'draft_model')) {
+        return {
+          toolId: 'draft_model',
+          reason: this.localize(
+            locale,
+            '本轮已完成结构草稿预解析，沿用 draft_model 作为执行入口',
+            'A structural draft was prefetched in this turn; keep draft_model as execution entrypoint',
+          ),
+        };
+      }
+
+      // When the message is a direct analysis execution trigger (e.g. "启动YJK", "run analysis")
+      // and a model already exists, skip draft_model and go straight to run_analysis.
+      if (hasModel && asksExecutionTrigger && this.hasActiveTool(activeToolIds, 'run_analysis')) {
+        return {
+          toolId: 'run_analysis',
+          reason: this.localize(locale, '模型已就绪，命中分析执行触发，走 run_analysis', 'Model is ready and an analysis execution trigger is detected; select run_analysis'),
+        };
+      }
+
+      if ((asksFreshModel || (!hasModel && !asksExecutionTrigger) || (asksModeling && !asksRunAnalysis && !asksReport && !asksCodeCheck))
+        && this.hasActiveTool(activeToolIds, 'draft_model')) {
+        return {
+          toolId: 'draft_model',
+          reason: this.localize(
+            locale,
+            asksFreshModel
+              ? '命中新建模型意图，优先重新草拟结构模型'
+              : '优先通过 draft_model 建立本轮结构模型',
+            asksFreshModel
+              ? 'Detected fresh-model intent; prefer re-drafting the structural model'
+              : 'Prefer draft_model to establish the structural model for this turn',
+          ),
+        };
+      }
+
+      if (hasModel && asksCodeCheck && this.hasActiveTool(activeToolIds, 'run_code_check')) {
+        return {
+          toolId: 'run_code_check',
+          reason: this.localize(locale, '命中规范校核意图，优先走 run_code_check', 'Detected code-check intent; prefer run_code_check'),
+        };
+      }
+
+      if (hasModel && asksReport && this.hasActiveTool(activeToolIds, 'generate_report')) {
+        return {
+          toolId: 'generate_report',
+          reason: this.localize(locale, '命中报告生成意图，优先走 generate_report', 'Detected report intent; prefer generate_report'),
+        };
+      }
+
+      if (hasModel && (asksRunAnalysis || asksModeling || asksExecutionTrigger) && this.hasActiveTool(activeToolIds, 'run_analysis')) {
+        return {
+          toolId: 'run_analysis',
+          reason: this.localize(locale, '模型已就绪，命中分析意图，走 run_analysis', 'Model is ready and analysis intent is detected; select run_analysis'),
+        };
+      }
+
+      if (hasModel && this.hasActiveTool(activeToolIds, 'validate_model')) {
+        return {
+          toolId: 'validate_model',
+          reason: this.localize(locale, '模型已存在，先做 validate_model 作为执行入口', 'Model exists; validate_model is used as execution entrypoint'),
+        };
+      }
+
+      if (this.hasActiveTool(activeToolIds, 'draft_model')) {
+        return {
+          toolId: 'draft_model',
+          reason: this.localize(locale, '回退到 draft_model 以建立可执行模型', 'Fallback to draft_model to establish an executable model'),
+        };
+      }
+
+      return null;
     }
 
-    if (prefetchedDraft?.draft.model && this.hasActiveTool(activeToolIds, 'draft_model')) {
-      return {
-        toolId: 'draft_model',
-        reason: this.localize(
-          locale,
-          '本轮已完成结构草稿预解析，沿用 draft_model 作为执行入口',
-          'A structural draft was prefetched in this turn; keep draft_model as execution entrypoint',
-        ),
-      };
-    }
-
-    if ((asksFreshModel || !hasModel || (asksModeling && !asksRunAnalysis && !asksReport && !asksCodeCheck))
-      && this.hasActiveTool(activeToolIds, 'draft_model')) {
-      return {
-        toolId: 'draft_model',
-        reason: this.localize(
-          locale,
-          asksFreshModel
-            ? '命中新建模型意图，优先重新草拟结构模型'
-            : '优先通过 draft_model 建立本轮结构模型',
-          asksFreshModel
-            ? 'Detected fresh-model intent; prefer re-drafting the structural model'
-            : 'Prefer draft_model to establish the structural model for this turn',
-        ),
-      };
-    }
-
-    if (hasModel && asksCodeCheck && this.hasActiveTool(activeToolIds, 'run_code_check')) {
-      return {
-        toolId: 'run_code_check',
-        reason: this.localize(locale, '命中规范校核意图，优先走 run_code_check', 'Detected code-check intent; prefer run_code_check'),
-      };
-    }
-
-    if (hasModel && asksReport && this.hasActiveTool(activeToolIds, 'generate_report')) {
-      return {
-        toolId: 'generate_report',
-        reason: this.localize(locale, '命中报告生成意图，优先走 generate_report', 'Detected report intent; prefer generate_report'),
-      };
-    }
-
-    if (hasModel && (asksRunAnalysis || asksModeling) && this.hasActiveTool(activeToolIds, 'run_analysis')) {
-      return {
-        toolId: 'run_analysis',
-        reason: this.localize(locale, '模型已就绪，命中分析意图，走 run_analysis', 'Model is ready and analysis intent is detected; select run_analysis'),
-      };
-    }
-
-    if (hasModel && this.hasActiveTool(activeToolIds, 'validate_model')) {
-      return {
-        toolId: 'validate_model',
-        reason: this.localize(locale, '模型已存在，先做 validate_model 作为执行入口', 'Model exists; validate_model is used as execution entrypoint'),
-      };
-    }
-
-    if (this.hasActiveTool(activeToolIds, 'draft_model')) {
-      return {
-        toolId: 'draft_model',
-        reason: this.localize(locale, '回退到 draft_model 以建立可执行模型', 'Fallback to draft_model to establish an executable model'),
-      };
-    }
-
-    return null;
-  }
 
   private buildDisabledToolMessage(toolId: string, locale: AppLocale): string {
     switch (toolId) {
@@ -4838,7 +4849,7 @@ export class AgentService {
       const raw = await redis.get(this.buildInteractionSessionKey(conversationId));
       if (raw) {
         const parsed = JSON.parse(raw);
-        if (parsed && typeof parsed === 'object' && parsed.draft) {
+        if (parsed && typeof parsed === 'object' && (parsed.draft || parsed.latestModel || parsed.resolved)) {
           return parsed as InteractionSession;
         }
       }

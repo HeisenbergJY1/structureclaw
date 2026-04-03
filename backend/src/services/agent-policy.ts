@@ -85,7 +85,8 @@ export class AgentPolicyService {
       'calculate the result',
       'run yjk',
       'start yjk',
-    ].some((pattern) => text.includes(pattern));
+    ].some((pattern) => text.includes(pattern))
+      || /做.{0,4}分析/.test(text);
   }
 
   inferProceedIntent(message: string): boolean {
