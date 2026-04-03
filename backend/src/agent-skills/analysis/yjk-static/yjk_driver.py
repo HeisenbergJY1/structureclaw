@@ -8,7 +8,7 @@ break if unexpected args are present.
 Usage (called by runtime.py via subprocess):
     <YJK_PYTHON> yjk_driver.py <model.json> <work_dir>
 
-Reads the V2 model JSON, converts to .ydb, launches YJK, runs a
+Reads the V2 model JSON, converts to .ydb, launches YJK GUI, runs a
 full static analysis, extracts structured results via yjks_pyload,
 and outputs the combined result JSON to stdout.
 
@@ -21,10 +21,28 @@ import json
 import os
 import shutil
 import sys
+import traceback
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
-def _setup_yjk_path() -> str:
-    """Prepend YJK install root to PATH so YJKAPI can find native DLLs.
+def _emit_json(payload: dict) -> None:
+    """Write the final result JSON to stdout (the ONLY stdout we produce)."""
+    print(json.dumps(payload, ensure_ascii=False))
+
+
+def _error(message: str) -> None:
+    _emit_json({
+        "status": "error",
+        "summary": {"engine": "yjk-static"},
+        "data": {},
+        "detailed": {"error": message},
+        "warnings": [message],
+    })
+
+
+def _setup_paths() -> str:
+    """Set up sys.path and os.environ["PATH"] for YJK.
 
     Returns the resolved YJKS_ROOT directory.
     """
@@ -36,11 +54,21 @@ def _setup_yjk_path() -> str:
     yjks_exe_env = os.environ.get("YJKS_EXE", "").strip().strip('"')
     if yjks_exe_env and os.path.isfile(yjks_exe_env):
         root = os.path.dirname(os.path.abspath(yjks_exe_env))
-        os.environ["PATH"] = root + os.pathsep + os.environ.get("PATH", "")
-        return root
-    if os.path.isdir(yjks_root):
-        os.environ["PATH"] = yjks_root + os.pathsep + os.environ.get("PATH", "")
-    return yjks_root
+    elif os.path.isdir(yjks_root):
+        root = yjks_root
+    else:
+        root = yjks_root
+
+    # DLL search path
+    os.environ["PATH"] = root + os.pathsep + os.environ.get("PATH", "")
+
+    # Python import paths: YJKS_ROOT itself (for native wrappers) and
+    # the driver's own directory (for yjk_converter).
+    for p in (root, SCRIPT_DIR):
+        if p and p not in sys.path:
+            sys.path.insert(0, p)
+
+    return root
 
 
 def _find_yjks_exe(root: str) -> str | None:
@@ -53,16 +81,17 @@ def _find_yjks_exe(root: str) -> str | None:
 
 def _run_cmd(cmd: str, arg: str = "") -> None:
     from YJKAPI import YJKSControl
+    print(f"[yjk_driver] RunCmd({cmd!r}, {arg!r})", file=sys.stderr, flush=True)
     YJKSControl.RunCmd(cmd, arg)
 
 
 def _collect_out_files(work_dir: str) -> str:
     """Read .OUT/.out files under work_dir as fallback result text."""
     lines: list[str] = []
-    for root, _dirs, files in os.walk(work_dir):
+    for dirpath, _dirs, files in os.walk(work_dir):
         for f in sorted(files):
             if f.upper().endswith(".OUT"):
-                fp = os.path.join(root, f)
+                fp = os.path.join(dirpath, f)
                 try:
                     text = open(fp, encoding="gbk", errors="replace").read()
                     lines.append(f"=== {f} ===\n{text[:3000]}")
@@ -73,10 +102,6 @@ def _collect_out_files(work_dir: str) -> str:
 
 def main() -> int:
     # -- Parse arguments ------------------------------------------------
-    # We receive exactly 2 args: model_json_path and work_dir.
-    # sys.argv is: [yjk_driver.py, model.json, work_dir]
-    # BUT YJKAPI __init__.py reads sys.argv[1] as "state" -- so we must
-    # consume and then strip our args before YJKAPI import.
     if len(sys.argv) < 3:
         _error("Usage: yjk_driver.py <model.json> <work_dir>")
         return 1
@@ -87,20 +112,31 @@ def main() -> int:
     # Strip our arguments so YJKAPI sees no stray sys.argv[1]
     sys.argv = [sys.argv[0]]
 
-    yjks_root = _setup_yjk_path()
+    yjks_root = _setup_paths()
 
-    # -- Now safe to import YJKAPI --------------------------------------
+    try:
+        return _run(model_path, work_dir, yjks_root)
+    except Exception:
+        _error(f"Unhandled exception in yjk_driver:\n{traceback.format_exc()}")
+        return 1
+
+
+def _run(model_path: str, work_dir: str, yjks_root: str) -> int:
+    # -- Import YJKAPI (requires sys.path set up by _setup_paths) ------
     from YJKAPI import ControlConfig, YJKSControl
 
     # -- Read V2 model JSON ---------------------------------------------
     with open(model_path, "r", encoding="utf-8") as f:
         model_data = json.load(f)
 
-    project_name = model_data.get("project", {}).get("name", "sc_model") if isinstance(model_data.get("project"), dict) else "sc_model"
-    project_name = project_name or "sc_model"
+    project = model_data.get("project")
+    project_name = (
+        project.get("name", "sc_model") if isinstance(project, dict) else "sc_model"
+    ) or "sc_model"
     ydb_filename = f"{project_name}.ydb"
 
     # -- Phase 1: Convert V2 -> .ydb ------------------------------------
+    print("[yjk_driver] Phase 1: V2 -> YDB conversion", file=sys.stderr, flush=True)
     from yjk_converter import convert_v2_to_ydb
 
     try:
@@ -108,31 +144,36 @@ def main() -> int:
     except Exception as exc:
         _error(f"V2 -> YDB conversion failed: {exc}")
         return 1
+    print(f"[yjk_driver] ydb_path = {ydb_path}", file=sys.stderr, flush=True)
 
-    # -- Phase 2: Launch YJK (strict three_story_steel_frame.py) --------
+    # -- Phase 2: Launch YJK (control.py test01 pattern) ----------------
     yjks_exe_env = os.environ.get("YJKS_EXE", "").strip().strip('"')
-    yjks_exe = yjks_exe_env if yjks_exe_env and os.path.isfile(yjks_exe_env) else _find_yjks_exe(yjks_root)
-
+    yjks_exe = (
+        yjks_exe_env if yjks_exe_env and os.path.isfile(yjks_exe_env)
+        else _find_yjks_exe(yjks_root)
+    )
     if not yjks_exe or not os.path.isfile(yjks_exe):
         _error(f"yjks.exe not found (YJKS_ROOT={yjks_root})")
         return 1
 
     version = os.environ.get("YJK_VERSION", "8.0.0").strip()
 
-    # Default: show the YJK GUI so the user can observe / intervene.
+    # Default: show the YJK GUI so the user can observe the full workflow.
     # Set YJK_INVISIBLE=1 in .env to run fully headless (CI / unattended).
     cfg = ControlConfig()
     cfg.Version = version
     cfg.Invisible = os.environ.get("YJK_INVISIBLE", "0").strip() == "1"
     YJKSControl.initConfig(cfg)
+
+    print(f"[yjk_driver] Phase 2: RunYJK({yjks_exe})", file=sys.stderr, flush=True)
     msg = YJKSControl.RunYJK(yjks_exe)
-    print("RunYJK:", msg, file=sys.stderr)
+    print(f"[yjk_driver] RunYJK returned: {msg}", file=sys.stderr, flush=True)
 
     # -- Phase 3: Open/create project + import ydb ----------------------
-    # Place the .yjk project file alongside the .ydb in the same work dir
-    # (mirrors the control.py test01 / three_story_steel_frame.py convention).
     project_dir = os.path.dirname(os.path.abspath(ydb_path))
     yjk_project = os.path.join(project_dir, f"{project_name}.yjk")
+
+    print(f"[yjk_driver] Phase 3: project = {yjk_project}", file=sys.stderr, flush=True)
     if os.path.isfile(yjk_project):
         _run_cmd("UIOpen", yjk_project)
     else:
@@ -141,12 +182,14 @@ def main() -> int:
     _run_cmd("yjk_importydb", ydb_path)
 
     # -- Phase 4: Model preparation (exact three_story_steel_frame.py) --
+    print("[yjk_driver] Phase 4: model repair / prep", file=sys.stderr, flush=True)
     _run_cmd("yjk_repair")
     _run_cmd("yjk_save")
     _run_cmd("yjk_formslab_alllayer")
     _run_cmd("yjk_setlayersupport")
 
     # -- Phase 5: Preprocessing + full analysis -------------------------
+    print("[yjk_driver] Phase 5: preprocessing + calculation", file=sys.stderr, flush=True)
     _run_cmd("yjkspre_genmodrel")
     _run_cmd("yjktransload_tlplan")
     _run_cmd("yjktransload_tlvert")
@@ -154,8 +197,13 @@ def main() -> int:
     _run_cmd("yjkdesign_dsncalculating_all")
     _run_cmd("SetCurrentLabel", "IDDSN_DSP")
 
+    print("[yjk_driver] Phase 5 complete: analysis finished", file=sys.stderr, flush=True)
+
     # -- Phase 6: Extract structured results via yjks_pyload ------------
-    extract_src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "extract_results.py")
+    # Result extraction is best-effort; if it fails we still return
+    # success and fall back to .OUT file contents.
+    print("[yjk_driver] Phase 6: extracting results", file=sys.stderr, flush=True)
+    extract_src = os.path.join(SCRIPT_DIR, "extract_results.py")
     extract_dst = os.path.join(work_dir, "extract_results.py")
     if os.path.isfile(extract_src) and extract_src != extract_dst:
         shutil.copy2(extract_src, extract_dst)
@@ -169,15 +217,15 @@ def main() -> int:
             if os.path.isfile(results_json_path):
                 with open(results_json_path, "r", encoding="utf-8") as rf:
                     structured_data = json.load(rf)
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"[yjk_driver] result extraction failed: {exc}", file=sys.stderr, flush=True)
 
     # -- Phase 7: Build final output ------------------------------------
     warnings: list[str] = []
     if structured_data is None:
         warnings.append("Structured result extraction failed; falling back to .OUT files")
 
-    output = {
+    output: dict = {
         "status": "success",
         "summary": {
             "engine": "yjk-static",
@@ -199,18 +247,9 @@ def main() -> int:
     else:
         output["detailed"]["raw_output"] = _collect_out_files(work_dir)
 
-    print(json.dumps(output, ensure_ascii=False))
+    _emit_json(output)
+    print("[yjk_driver] done", file=sys.stderr, flush=True)
     return 0
-
-
-def _error(message: str) -> None:
-    print(json.dumps({
-        "status": "error",
-        "summary": {"engine": "yjk-static"},
-        "data": {},
-        "detailed": {"error": message},
-        "warnings": [message],
-    }, ensure_ascii=False))
 
 
 if __name__ == "__main__":

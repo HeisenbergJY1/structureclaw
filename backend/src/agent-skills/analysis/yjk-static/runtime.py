@@ -131,7 +131,7 @@ def run_analysis(model: Dict[str, Any], parameters: Dict[str, Any]) -> Dict[str,
     if root:
         env.setdefault("YJKS_ROOT", root)
         env.setdefault("YJK_PATH", root)
-    for key in ("YJKS_EXE", "YJK_VERSION", "YJK_PYTHON_BIN"):
+    for key in ("YJKS_EXE", "YJK_VERSION", "YJK_PYTHON_BIN", "YJK_INVISIBLE"):
         val = os.getenv(key, "").strip()
         if val:
             env[key] = val
@@ -153,25 +153,37 @@ def run_analysis(model: Dict[str, Any], parameters: Dict[str, Any]) -> Dict[str,
     except FileNotFoundError as exc:
         raise RuntimeError(f"Cannot launch YJK Python: {exc}")
 
-    # Parse stdout as JSON result
+    # Parse stdout as JSON result.
+    # The driver writes only ONE JSON blob to stdout; all progress/debug
+    # output goes to stderr so the user can see it in the backend log.
     stdout = result.stdout.strip()
     stderr = result.stderr.strip()
 
+    if stderr:
+        import logging
+        logging.getLogger("yjk-runtime").info("YJK driver stderr:\n%s", stderr)
+
     if result.returncode != 0 and not stdout:
-        stderr_snippet = stderr[:500] if stderr else "(no stderr)"
+        stderr_snippet = stderr[:800] if stderr else "(no stderr)"
         raise RuntimeError(
-            f"YJK driver exited with code {result.returncode}. stderr: {stderr_snippet}"
+            f"YJK driver exited with code {result.returncode}.\n"
+            f"stderr: {stderr_snippet}"
         )
 
     if not stdout:
-        raise RuntimeError("YJK driver produced no output")
+        stderr_snippet = stderr[:800] if stderr else "(no stderr)"
+        raise RuntimeError(
+            f"YJK driver produced no stdout output.\n"
+            f"stderr: {stderr_snippet}"
+        )
 
     try:
         output = json.loads(stdout)
     except json.JSONDecodeError:
         raise RuntimeError(
-            f"YJK driver output is not valid JSON. "
-            f"stdout (first 500 chars): {stdout[:500]}"
+            f"YJK driver output is not valid JSON.\n"
+            f"stdout (first 500 chars): {stdout[:500]}\n"
+            f"stderr (first 500 chars): {stderr[:500]}"
         )
 
     status = output.get("status", "error")
