@@ -383,17 +383,21 @@ function normalizeFrameNaturalPatch(message: string, existingState: DraftState |
     /间隔(?:都?是|也是|为)?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:m|米)/i,
   ]);
 
-  // Vertical load — with or without 荷载 keyword
+  // Vertical load — with or without 荷载 keyword.
+  // Accepts both "各层荷载100kN" and "各层荷载 (kN) 100" orderings.
   const verticalLoadKN = extractScalar(text, [
     /(?:每层|各层)(?:节点)?(?:竖向)?荷载(?:都?是|均为|为|是)?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:kn|千牛)/i,
+    /(?:每层|各层)(?:节点)?(?:竖向)?荷载\s*\(?(?:kn|千牛)\)?\s*([0-9]+(?:\.[0-9]+)?)/i,
     /(?:每层|各层)竖向\s*([0-9]+(?:\.[0-9]+)?)\s*(?:kn|千牛)/i,
   ]);
 
   const dualLateralLoadKN = extractScalar(text, [
-    /x(?:、|\/|和|及)\s*y向(?:水平|横向|侧向)?荷载(?:都?是|均为|各为|为|是)?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:kn|千牛)/i,
+    /x(?:、|\/|和|及)\s*y(?:\s*向)?(?:水平|横向|侧向)?荷载(?:都?是|均为|各为|为|是)?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:kn|千牛)?/i,
+    /x(?:、|\/|和|及)\s*y(?:\s*向)?(?:水平|横向|侧向)?荷载\s*\(?(?:kn|千牛)\)?\s*([0-9]+(?:\.[0-9]+)?)/i,
   ]);
   const extractedLateralXLoadKN = dualLateralLoadKN ?? extractScalar(text, [
     /(?:横向|侧向|水平)(?:方向)?荷载(?:两个方向)?(?:都?是|均为|都为|为|是)?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:kn|千牛)/i,
+    /(?:横向|侧向|水平)(?:方向)?荷载\s*\(?(?:kn|千牛)\)?\s*([0-9]+(?:\.[0-9]+)?)/i,
     /水平方向荷载(?:都?是|均为|为|是)?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:kn|千牛)/i,
     /(?:横向|侧向|水平)荷载(?:都?是|均为|为|是)?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:kn|千牛)/i,
   ]) ?? extractDirectionalLoadScalar(text, 'x');
