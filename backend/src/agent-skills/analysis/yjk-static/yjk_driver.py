@@ -119,14 +119,20 @@ def main() -> int:
 
     version = os.environ.get("YJK_VERSION", "8.0.0").strip()
 
+    # Default: show the YJK GUI so the user can observe / intervene.
+    # Set YJK_INVISIBLE=1 in .env to run fully headless (CI / unattended).
     cfg = ControlConfig()
     cfg.Version = version
-    cfg.Invisible = True
+    cfg.Invisible = os.environ.get("YJK_INVISIBLE", "0").strip() == "1"
     YJKSControl.initConfig(cfg)
     msg = YJKSControl.RunYJK(yjks_exe)
+    print("RunYJK:", msg, file=sys.stderr)
 
     # -- Phase 3: Open/create project + import ydb ----------------------
-    yjk_project = os.path.join(work_dir, f"{project_name}.yjk")
+    # Place the .yjk project file alongside the .ydb in the same work dir
+    # (mirrors the control.py test01 / three_story_steel_frame.py convention).
+    project_dir = os.path.dirname(os.path.abspath(ydb_path))
+    yjk_project = os.path.join(project_dir, f"{project_name}.yjk")
     if os.path.isfile(yjk_project):
         _run_cmd("UIOpen", yjk_project)
     else:

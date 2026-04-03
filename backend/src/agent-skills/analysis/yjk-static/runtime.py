@@ -22,6 +22,9 @@ YJK_VERSION : str, optional
     YJK version string passed to ControlConfig.  Default ``8.0.0``.
 YJK_TIMEOUT_S : str, optional
     Subprocess timeout in seconds.  Default ``600``.
+YJK_INVISIBLE : str, optional
+    Set to ``"1"`` to launch YJK headlessly (no GUI window).
+    Default ``"0"`` — YJK GUI is visible so the user can observe the run.
 """
 from __future__ import annotations
 
