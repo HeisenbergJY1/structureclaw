@@ -134,7 +134,29 @@ function resolveSectionProps(
     ? getDefaultColumnSection(storyCount)
     : getDefaultBeamSection(storyCount);
   const normalized = section ? normalizeSectionName(section) : defaultSection;
-  const sectionKey = H_SECTION_PROPERTIES[normalized] ? normalized : defaultSection;
+
+  // Check standard table first
+  if (H_SECTION_PROPERTIES[normalized]) {
+    return { name: normalized, ...H_SECTION_PROPERTIES[normalized]!, G: matG };
+  }
+
+  // Try to parse custom H-section dimensions from name like HW500X500X20X20
+  const m = normalized.match(/^(?:HW|HN|HM|HP|HT)(\d+)X(\d+)(?:X(\d+)X(\d+))?$/i);
+  if (m) {
+    const H = Number(m[1]) / 1000;   // mm -> m
+    const B = Number(m[2]) / 1000;
+    const tw = m[3] ? Number(m[3]) / 1000 : H / 50;
+    const tf = m[4] ? Number(m[4]) / 1000 : B / 20;
+    // Approximate I-section properties
+    const A = 2 * B * tf + (H - 2 * tf) * tw;
+    const Iy = (B * H ** 3 - (B - tw) * (H - 2 * tf) ** 3) / 12;
+    const Iz = (2 * tf * B ** 3 + (H - 2 * tf) * tw ** 3) / 12;
+    const J = (2 * B * tf ** 3 + (H - 2 * tf) * tw ** 3) / 3;
+    return { name: normalized, A, Iy, Iz, J, G: matG };
+  }
+
+  // Fallback to default
+  const sectionKey = defaultSection;
   return { name: sectionKey, ...H_SECTION_PROPERTIES[sectionKey]!, G: matG };
 }
 

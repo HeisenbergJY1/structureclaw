@@ -197,9 +197,63 @@ def _ensure_v2_model(model_dict: dict) -> dict:
                 # Default to steel for YJK steel frame workflow
                 mat["category"] = "steel"
 
-    # --- Enrich sections with width/height from properties ---
+    # --- Enrich sections: recognize standard steel names and geometry ---
+    import re
+    _STD_STEEL_RE = re.compile(
+        r'^(HW|HN|HM|HP|HT|I|C|L|TW|TN)\d+[Xx×]\d+',
+        re.IGNORECASE,
+    )
+    # Pattern to extract H-section dimensions from name like HW500X500X20X20
+    _H_DIMS_RE = re.compile(
+        r'^(?:HW|HN|HM|HP|HT)(\d+)[Xx×](\d+)(?:[Xx×](\d+)[Xx×](\d+))?',
+        re.IGNORECASE,
+    )
+
     for sec in v2.get("sections", []):
         props = sec.get("properties", {})
+        sec_name = (sec.get("name") or "").strip()
+
+        # Recognize standard steel section names (HW300X300, HN400X200, etc.)
+        if sec_name and _STD_STEEL_RE.match(sec_name):
+            m = _H_DIMS_RE.match(sec_name)
+            if m:
+                H_val = int(m.group(1))
+                B_val = int(m.group(2))
+                tw_val = int(m.group(3)) if m.group(3) else None
+                tf_val = int(m.group(4)) if m.group(4) else None
+                if not sec.get("height"):
+                    sec["height"] = H_val
+                if not sec.get("width"):
+                    sec["width"] = B_val
+
+                if tw_val and tf_val:
+                    # Full H-section dims (e.g. HW500X500X20X20) -> kind=2 custom I/H
+                    sec["type"] = "H"
+                    props.setdefault("tw", tw_val)
+                    props.setdefault("H", H_val)
+                    props.setdefault("B1", B_val)
+                    props.setdefault("B2", B_val)
+                    props.setdefault("tf1", tf_val)
+                    props.setdefault("tf2", tf_val)
+                    # Remove standard_steel_name so converter uses ShapeVal path
+                    props.pop("standard_steel_name", None)
+                    sec["properties"] = props
+                else:
+                    # Standard 2-part name (e.g. HW300X300) -> kind=26 lookup
+                    props.setdefault("standard_steel_name",
+                                     sec_name.upper().replace("×", "X").replace("x", "X"))
+                    sec["properties"] = props
+                    if not sec.get("type") or sec.get("type") == "beam":
+                        sec["type"] = "H"
+            else:
+                props.setdefault("standard_steel_name",
+                                 sec_name.upper().replace("×", "X").replace("x", "X"))
+                sec["properties"] = props
+                if not sec.get("type") or sec.get("type") == "beam":
+                    sec["type"] = "H"
+            continue
+
+        # Non-standard sections: try to get width/height from properties
         if not sec.get("width") and "B" in props:
             sec["width"] = float(props["B"])
         if not sec.get("height") and "H" in props:
@@ -208,11 +262,10 @@ def _ensure_v2_model(model_dict: dict) -> dict:
             sec["width"] = float(props["b"])
         if not sec.get("height") and "h" in props:
             sec["height"] = float(props["h"])
-        # Ensure A/Iy are not the only properties (converter needs shape info)
+        # Last resort: approximate from area
         if not sec.get("width") and not sec.get("height"):
             a = props.get("A", 0)
             if a and not props.get("B") and not props.get("H"):
-                # Approximate rectangular from area
                 import math
                 side = round(math.sqrt(float(a)) * 1000, 0)  # m² -> mm
                 if side > 0:
