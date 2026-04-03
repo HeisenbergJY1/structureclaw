@@ -72,10 +72,22 @@ def _resolve_yjk_python() -> str:
 
 
 def _resolve_work_dir() -> Path:
-    """Return the work directory for this analysis run."""
+    """Return a per-run subdirectory under YJK_WORK_DIR.
+
+    YJK_WORK_DIR should be set by the user so that generated project files,
+    .OUT results, and logs land in a known, reviewable location.
+    Falls back to the system temp directory when unset (not recommended).
+    """
+    import warnings
     base = os.getenv("YJK_WORK_DIR", "").strip()
     if not base:
-        base = str(Path(tempfile.gettempdir()) / "yjk_projects")
+        fallback = str(Path(tempfile.gettempdir()) / "yjk_projects")
+        warnings.warn(
+            "YJK_WORK_DIR is not set; using system temp directory as fallback: "
+            f"{fallback}. Set YJK_WORK_DIR in .env to a persistent location.",
+            stacklevel=2,
+        )
+        base = fallback
     project_name = f"sc_{uuid.uuid4().hex[:8]}"
     work = Path(base) / project_name
     work.mkdir(parents=True, exist_ok=True)
