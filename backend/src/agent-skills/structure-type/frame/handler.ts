@@ -647,26 +647,26 @@ function buildFrame2dLocalModel(
   const floorLoads = state.floorLoads!;
   const baseSupport = (state.frameBaseSupportType as string | undefined) ?? 'fixed';
   const xCoords = accumulateCoords(bayWidths);
-  const yCoords = accumulateCoords(storyHeights);
+  const zCoords = accumulateCoords(storyHeights);
   const nodes: Array<Record<string, unknown>> = [];
   const elements: Array<Record<string, unknown>> = [];
   const loads: Array<Record<string, unknown>> = [];
   let elementId = 1;
 
-  for (let si = 0; si < yCoords.length; si++) {
+  for (let si = 0; si < zCoords.length; si++) {
     for (let bi = 0; bi < xCoords.length; bi++) {
-      const node: Record<string, unknown> = { id: n2dId(si, bi), x: xCoords[bi], y: yCoords[si], z: 0 };
+      const node: Record<string, unknown> = { id: n2dId(si, bi), x: xCoords[bi], y: 0, z: zCoords[si] };
       if (si === 0) node.restraints = buildBaseRestraint(baseSupport);
       nodes.push(node);
     }
   }
-  for (let si = 1; si < yCoords.length; si++) {
+  for (let si = 1; si < zCoords.length; si++) {
     for (let bi = 0; bi < xCoords.length; bi++) {
       elements.push({ id: `C${elementId}`, type: 'beam', nodes: [n2dId(si - 1, bi), n2dId(si, bi)], material: '1', section: '1' });
       elementId += 1;
     }
   }
-  for (let si = 1; si < yCoords.length; si++) {
+  for (let si = 1; si < zCoords.length; si++) {
     for (let bi = 0; bi < bayWidths.length; bi++) {
       elements.push({ id: `B${elementId}`, type: 'beam', nodes: [n2dId(si, bi), n2dId(si, bi + 1)], material: '1', section: '2' });
       elementId += 1;
@@ -675,12 +675,12 @@ function buildFrame2dLocalModel(
   const levelNodeCount = xCoords.length;
   for (const load of floorLoads) {
     const si = load.story;
-    if (si <= 0 || si >= yCoords.length) continue;
+    if (si <= 0 || si >= zCoords.length) continue;
     const vPerNode = load.verticalKN !== undefined ? -load.verticalKN / levelNodeCount : undefined;
     const lPerNode = load.lateralXKN !== undefined ? load.lateralXKN / levelNodeCount : undefined;
     for (let bi = 0; bi < xCoords.length; bi++) {
       const nodeLoad: Record<string, unknown> = { node: n2dId(si, bi) };
-      if (vPerNode !== undefined) nodeLoad.fy = vPerNode;
+      if (vPerNode !== undefined) nodeLoad.fz = vPerNode;
       if (lPerNode !== undefined) nodeLoad.fx = lPerNode;
       if (Object.keys(nodeLoad).length > 1) loads.push(nodeLoad);
     }
@@ -724,39 +724,39 @@ function buildFrame3dLocalModel(
   const floorLoads = state.floorLoads!;
   const baseSupport = (state.frameBaseSupportType as string | undefined) ?? 'fixed';
   const xCoords = accumulateCoords(bayWidthsX);
-  const zCoords = accumulateCoords(bayWidthsY);
-  const yCoords = accumulateCoords(storyHeights);
+  const yCoords = accumulateCoords(bayWidthsY);
+  const zCoords = accumulateCoords(storyHeights);
   const nodes: Array<Record<string, unknown>> = [];
   const elements: Array<Record<string, unknown>> = [];
   const loads: Array<Record<string, unknown>> = [];
   let elementId = 1;
 
-  for (let si = 0; si < yCoords.length; si++) {
+  for (let si = 0; si < zCoords.length; si++) {
     for (let xi = 0; xi < xCoords.length; xi++) {
-      for (let yi = 0; yi < zCoords.length; yi++) {
-        const node: Record<string, unknown> = { id: n3dId(si, xi, yi), x: xCoords[xi], y: yCoords[si], z: zCoords[yi] };
+      for (let yi = 0; yi < yCoords.length; yi++) {
+        const node: Record<string, unknown> = { id: n3dId(si, xi, yi), x: xCoords[xi], y: yCoords[yi], z: zCoords[si] };
         if (si === 0) node.restraints = buildBaseRestraint(baseSupport);
         nodes.push(node);
       }
     }
   }
-  for (let si = 1; si < yCoords.length; si++) {
+  for (let si = 1; si < zCoords.length; si++) {
     for (let xi = 0; xi < xCoords.length; xi++) {
-      for (let yi = 0; yi < zCoords.length; yi++) {
+      for (let yi = 0; yi < yCoords.length; yi++) {
         elements.push({ id: `C${elementId}`, type: 'beam', nodes: [n3dId(si - 1, xi, yi), n3dId(si, xi, yi)], material: '1', section: '1' });
         elementId += 1;
       }
     }
   }
-  for (let si = 1; si < yCoords.length; si++) {
+  for (let si = 1; si < zCoords.length; si++) {
     for (let xi = 0; xi < bayWidthsX.length; xi++) {
-      for (let yi = 0; yi < zCoords.length; yi++) {
+      for (let yi = 0; yi < yCoords.length; yi++) {
         elements.push({ id: `BX${elementId}`, type: 'beam', nodes: [n3dId(si, xi, yi), n3dId(si, xi + 1, yi)], material: '1', section: '2' });
         elementId += 1;
       }
     }
   }
-  for (let si = 1; si < yCoords.length; si++) {
+  for (let si = 1; si < zCoords.length; si++) {
     for (let xi = 0; xi < xCoords.length; xi++) {
       for (let yi = 0; yi < bayWidthsY.length; yi++) {
         elements.push({ id: `BY${elementId}`, type: 'beam', nodes: [n3dId(si, xi, yi), n3dId(si, xi, yi + 1)], material: '1', section: '2' });
@@ -764,19 +764,19 @@ function buildFrame3dLocalModel(
       }
     }
   }
-  const levelNodeCount = xCoords.length * zCoords.length;
+  const levelNodeCount = xCoords.length * yCoords.length;
   for (const load of floorLoads) {
     const si = load.story;
-    if (si <= 0 || si >= yCoords.length) continue;
+    if (si <= 0 || si >= zCoords.length) continue;
     const vPerNode = load.verticalKN !== undefined ? -load.verticalKN / levelNodeCount : undefined;
     const lxPerNode = load.lateralXKN !== undefined ? load.lateralXKN / levelNodeCount : undefined;
     const lyPerNode = load.lateralYKN !== undefined ? load.lateralYKN / levelNodeCount : undefined;
     for (let xi = 0; xi < xCoords.length; xi++) {
-      for (let yi = 0; yi < zCoords.length; yi++) {
+      for (let yi = 0; yi < yCoords.length; yi++) {
         const nodeLoad: Record<string, unknown> = { node: n3dId(si, xi, yi) };
-        if (vPerNode !== undefined) nodeLoad.fy = vPerNode;
+        if (vPerNode !== undefined) nodeLoad.fz = vPerNode;
         if (lxPerNode !== undefined) nodeLoad.fx = lxPerNode;
-        if (lyPerNode !== undefined) nodeLoad.fz = lyPerNode;
+        if (lyPerNode !== undefined) nodeLoad.fy = lyPerNode;
         if (Object.keys(nodeLoad).length > 1) loads.push(nodeLoad);
       }
     }

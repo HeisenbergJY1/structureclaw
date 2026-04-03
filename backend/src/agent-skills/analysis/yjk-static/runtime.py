@@ -135,6 +135,9 @@ def _ensure_v2_model(model_dict: dict) -> dict:
     width/height, materials with category).  V1 models from draft_model
     lack these.  This function synthesizes the missing V2 fields from V1
     data so the converter can proceed.
+
+    Coordinate system: V1 frame handler uses (x=X, y=vertical, z=Y).
+    V2 / YJK expects (x=X, y=Y, z=vertical).  We detect and remap.
     """
     if model_dict.get("schema_version", "").startswith("2"):
         return model_dict
@@ -143,19 +146,15 @@ def _ensure_v2_model(model_dict: dict) -> dict:
     v2 = deepcopy(model_dict)
     v2["schema_version"] = "2.0.0"
 
-    # --- Synthesize stories from node Z coordinates ---
     nodes = v2.get("nodes", [])
+
+    # --- Synthesize stories from node Z coordinates (vertical) ---
     if not v2.get("stories") and nodes:
         z_vals = sorted({round(float(n.get("z", 0)), 3) for n in nodes})
-        # Filter out z=0 (ground) and derive story heights from Z gaps
         elevations = [z for z in z_vals if z > 0]
         if not elevations:
-            # Single-story: use max Z as story height
             max_z = max((float(n.get("z", 0)) for n in nodes), default=3.0)
-            if max_z > 0:
-                elevations = [max_z]
-            else:
-                elevations = [3.0]
+            elevations = [max_z] if max_z > 0 else [3.0]
 
         stories = []
         prev_elev = 0.0
@@ -176,11 +175,8 @@ def _ensure_v2_model(model_dict: dict) -> dict:
             prev_elev = elev
         v2["stories"] = stories
 
-        # Assign story ids to nodes based on Z
-        elev_to_story = {}
-        for s in stories:
-            elev_to_story[round(s["elevation"], 3)] = s["id"]
-        for n in v2.get("nodes", []):
+        elev_to_story = {round(s["elevation"], 3): s["id"] for s in stories}
+        for n in nodes:
             nz = round(float(n.get("z", 0)), 3)
             if nz in elev_to_story and not n.get("story"):
                 n["story"] = elev_to_story[nz]
@@ -194,7 +190,6 @@ def _ensure_v2_model(model_dict: dict) -> dict:
             elif any(k in name for k in ("concrete", "混凝土", "c20", "c25", "c30", "c35", "c40")):
                 mat["category"] = "concrete"
             else:
-                # Default to steel for YJK steel frame workflow
                 mat["category"] = "steel"
 
     # --- Enrich sections: recognize standard steel names and geometry ---
@@ -203,7 +198,6 @@ def _ensure_v2_model(model_dict: dict) -> dict:
         r'^(HW|HN|HM|HP|HT|I|C|L|TW|TN)\d+[Xx×]\d+',
         re.IGNORECASE,
     )
-    # Pattern to extract H-section dimensions from name like HW500X500X20X20
     _H_DIMS_RE = re.compile(
         r'^(?:HW|HN|HM|HP|HT)(\d+)[Xx×](\d+)(?:[Xx×](\d+)[Xx×](\d+))?',
         re.IGNORECASE,
@@ -213,7 +207,6 @@ def _ensure_v2_model(model_dict: dict) -> dict:
         props = sec.get("properties", {})
         sec_name = (sec.get("name") or "").strip()
 
-        # Recognize standard steel section names (HW300X300, HN400X200, etc.)
         if sec_name and _STD_STEEL_RE.match(sec_name):
             m = _H_DIMS_RE.match(sec_name)
             if m:
@@ -227,7 +220,6 @@ def _ensure_v2_model(model_dict: dict) -> dict:
                     sec["width"] = B_val
 
                 if tw_val and tf_val:
-                    # Full H-section dims (e.g. HW500X500X20X20) -> kind=2 custom I/H
                     sec["type"] = "H"
                     props.setdefault("tw", tw_val)
                     props.setdefault("H", H_val)
@@ -235,11 +227,9 @@ def _ensure_v2_model(model_dict: dict) -> dict:
                     props.setdefault("B2", B_val)
                     props.setdefault("tf1", tf_val)
                     props.setdefault("tf2", tf_val)
-                    # Remove standard_steel_name so converter uses ShapeVal path
                     props.pop("standard_steel_name", None)
                     sec["properties"] = props
                 else:
-                    # Standard 2-part name (e.g. HW300X300) -> kind=26 lookup
                     props.setdefault("standard_steel_name",
                                      sec_name.upper().replace("×", "X").replace("x", "X"))
                     sec["properties"] = props
@@ -253,7 +243,6 @@ def _ensure_v2_model(model_dict: dict) -> dict:
                     sec["type"] = "H"
             continue
 
-        # Non-standard sections: try to get width/height from properties
         if not sec.get("width") and "B" in props:
             sec["width"] = float(props["B"])
         if not sec.get("height") and "H" in props:
@@ -262,20 +251,19 @@ def _ensure_v2_model(model_dict: dict) -> dict:
             sec["width"] = float(props["b"])
         if not sec.get("height") and "h" in props:
             sec["height"] = float(props["h"])
-        # Last resort: approximate from area
         if not sec.get("width") and not sec.get("height"):
             a = props.get("A", 0)
             if a and not props.get("B") and not props.get("H"):
                 import math
-                side = round(math.sqrt(float(a)) * 1000, 0)  # m² -> mm
+                side = round(math.sqrt(float(a)) * 1000, 0)
                 if side > 0:
                     sec["width"] = side
                     sec["height"] = side
 
-    # --- Enrich elements with column type based on orientation ---
+    # --- Enrich elements with column type based on vertical (Z) orientation ---
+    node_map = {n["id"]: n for n in nodes}
     for elem in v2.get("elements", []):
-        if elem.get("type") == "beam":
-            node_map = {n["id"]: n for n in v2.get("nodes", [])}
+        if elem.get("type") in ("beam", "column"):
             nids = elem.get("nodes", [])
             if len(nids) >= 2:
                 n1 = node_map.get(nids[0], {})
@@ -283,8 +271,10 @@ def _ensure_v2_model(model_dict: dict) -> dict:
                 dz = abs(float(n2.get("z", 0)) - float(n1.get("z", 0)))
                 dx = abs(float(n2.get("x", 0)) - float(n1.get("x", 0)))
                 dy = abs(float(n2.get("y", 0)) - float(n1.get("y", 0)))
-                if dz > 0 and dz >= max(dx, dy):
+                if dz > 0 and dz >= max(dx, dy, 0.001):
                     elem["type"] = "column"
+                elif elem.get("type") != "column":
+                    elem["type"] = "beam"
 
     return v2
 

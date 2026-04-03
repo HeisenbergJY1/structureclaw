@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import sys
 import traceback
 
@@ -213,31 +212,13 @@ def _run(model_path: str, work_dir: str, yjks_root: str) -> int:
 
     print("[yjk_driver] Phase 5 complete: analysis finished", file=sys.stderr, flush=True)
 
-    # -- Phase 6: Extract structured results via yjks_pyload ------------
-    # Result extraction is best-effort; if it fails we still return
-    # success and fall back to .OUT file contents.
-    print("[yjk_driver] Phase 6: extracting results", file=sys.stderr, flush=True)
-    extract_src = os.path.join(SCRIPT_DIR, "extract_results.py")
-    extract_dst = os.path.join(work_dir, "extract_results.py")
-    if os.path.isfile(extract_src) and extract_src != extract_dst:
-        shutil.copy2(extract_src, extract_dst)
-
-    results_json_path = os.path.join(work_dir, "results.json")
-    structured_data = None
-
-    if os.path.isfile(extract_dst):
-        try:
-            YJKSControl.RunCmd("yjks_pyload", extract_dst, "extract")
-            if os.path.isfile(results_json_path):
-                with open(results_json_path, "r", encoding="utf-8") as rf:
-                    structured_data = json.load(rf)
-        except Exception as exc:
-            print(f"[yjk_driver] result extraction failed: {exc}", file=sys.stderr, flush=True)
+    # -- Phase 6: Skip result extraction for now -------------------------
+    # TODO: implement structured result extraction via yjks_pyload
+    print("[yjk_driver] Phase 6: result extraction skipped (not yet implemented)", file=sys.stderr, flush=True)
 
     # -- Phase 7: Build final output ------------------------------------
     warnings: list[str] = []
-    if structured_data is None:
-        warnings.append("Structured result extraction failed; falling back to .OUT files")
+    warnings.append("Structured result extraction not yet implemented; returning .OUT files as fallback")
 
     output: dict = {
         "status": "success",
@@ -247,19 +228,10 @@ def _run(model_path: str, work_dir: str, yjks_root: str) -> int:
             "yjk_project": yjk_project,
             "work_dir": work_dir,
         },
-        "data": structured_data or {},
-        "detailed": {},
+        "data": {},
+        "detailed": {"raw_output": _collect_out_files(work_dir)},
         "warnings": warnings,
     }
-
-    if structured_data:
-        meta = structured_data.get("meta", {})
-        output["summary"]["n_floors"] = meta.get("n_floors")
-        output["summary"]["n_nodes"] = meta.get("n_nodes")
-        output["summary"]["load_cases"] = meta.get("load_cases")
-        output["summary"]["floor_stats"] = structured_data.get("floor_stats", [])
-    else:
-        output["detailed"]["raw_output"] = _collect_out_files(work_dir)
 
     _emit_json(output)
     print("[yjk_driver] done", file=sys.stderr, flush=True)
