@@ -186,7 +186,7 @@ API request (analysis_type, model, parameters, engineId?)
 | `builtin-opensees` | Subprocess probe (`opensees_runtime.py --json`) | — |
 | `builtin-simplified` | Always available | — |
 | `builtin-pkpm` | `PKPM_CYCLE_PATH` exists and points to valid file | `PKPM_CYCLE_PATH` |
-| `builtin-yjk` | `YJK_PATH` exists and points to valid directory | `YJK_PATH` |
+| `builtin-yjk` | `YJK_PATH` exists, contains `yjks.exe` and `Python310/python.exe` | `YJK_PATH`, `YJKS_EXE`, `YJK_PYTHON_BIN` |
 
 ---
 

@@ -512,8 +512,33 @@ class AnalysisEngineRegistry:
         yjk_path = os.getenv("YJK_PATH", "").strip()
         if not yjk_path:
             return "YJK is not configured (YJK_PATH not set)"
-        if not Path(yjk_path).exists():
+        yjk_root = Path(yjk_path)
+        if not yjk_root.exists():
             return f"YJK installation not found at {yjk_path}"
+
+        # Check yjks.exe (can be overridden via YJKS_EXE)
+        yjks_exe = os.getenv("YJKS_EXE", "").strip()
+        if yjks_exe:
+            if not Path(yjks_exe).is_file():
+                return f"YJKS_EXE not found at {yjks_exe}"
+        else:
+            found_exe = any(
+                (yjk_root / name).is_file()
+                for name in ("yjks.exe", "YJKS.exe")
+            )
+            if not found_exe:
+                return f"yjks.exe not found under {yjk_path}"
+
+        # Check YJK bundled Python 3.10 (can be overridden via YJK_PYTHON_BIN)
+        yjk_python = os.getenv("YJK_PYTHON_BIN", "").strip()
+        if yjk_python:
+            if not Path(yjk_python).is_file():
+                return f"YJK_PYTHON_BIN not found at {yjk_python}"
+        else:
+            python_exe = yjk_root / "Python310" / "python.exe"
+            if not python_exe.is_file():
+                return f"YJK Python310 not found at {python_exe}"
+
         return None
 
     def _builtin_manifests(self) -> List[Dict[str, Any]]:
