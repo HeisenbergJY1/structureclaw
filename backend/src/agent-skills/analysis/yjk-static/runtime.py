@@ -98,9 +98,11 @@ def run_analysis(model: Dict[str, Any], parameters: Dict[str, Any]) -> Dict[str,
     work_dir = _resolve_work_dir()
     timeout = int(os.getenv("YJK_TIMEOUT_S", "600").strip() or "600")
 
-    # Write V2 model JSON to work directory
+    # Write V2 model JSON to work directory.
+    # `model` may arrive as a Pydantic object (StructureModelV1); serialize it first.
+    model_dict = model.model_dump(mode="json") if hasattr(model, "model_dump") else model
     model_path = work_dir / "model.json"
-    model_path.write_text(json.dumps(model, ensure_ascii=False), encoding="utf-8")
+    model_path.write_text(json.dumps(model_dict, ensure_ascii=False), encoding="utf-8")
 
     # Locate the driver script (sibling of this file)
     driver_path = Path(__file__).resolve().parent / "yjk_driver.py"

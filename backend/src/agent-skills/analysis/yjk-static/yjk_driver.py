@@ -121,7 +121,7 @@ def main() -> int:
 
     cfg = ControlConfig()
     cfg.Version = version
-    cfg.Invisible = False
+    cfg.Invisible = True
     YJKSControl.initConfig(cfg)
     msg = YJKSControl.RunYJK(yjks_exe)
 
