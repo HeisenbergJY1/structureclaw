@@ -94,6 +94,40 @@ def _resolve_work_dir() -> Path:
     return work
 
 
+def _extract_last_json(text: str) -> dict | None:
+    """Extract the last complete JSON object from text.
+
+    YJK's Python runtime may print non-JSON lines (copyright banners,
+    init messages) to stdout before our _emit_json() call.  We scan
+    backwards for the last '{' ... '}' block that parses cleanly.
+    """
+    # Fast path: the whole string is valid JSON
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Scan for the last '{' and try progressively larger suffixes
+    last_brace = text.rfind('{')
+    if last_brace == -1:
+        return None
+    try:
+        return json.loads(text[last_brace:])
+    except json.JSONDecodeError:
+        pass
+
+    # Fallback: try each line from the end
+    lines = text.splitlines()
+    for i in range(len(lines) - 1, -1, -1):
+        candidate = '\n'.join(lines[i:]).strip()
+        if candidate.startswith('{'):
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+    return None
+
+
 def run_analysis(model: Dict[str, Any], parameters: Dict[str, Any]) -> Dict[str, Any]:
     """Entry point called by the analysis registry.
 
@@ -177,9 +211,12 @@ def run_analysis(model: Dict[str, Any], parameters: Dict[str, Any]) -> Dict[str,
             f"stderr: {stderr_snippet}"
         )
 
-    try:
-        output = json.loads(stdout)
-    except json.JSONDecodeError:
+    # YJK's Python runtime may print non-JSON text (copyright banners,
+    # init messages) to stdout before our _emit_json() call.  Extract
+    # the last complete JSON object from stdout so those lines don't
+    # break parsing.
+    output = _extract_last_json(stdout)
+    if output is None:
         raise RuntimeError(
             f"YJK driver output is not valid JSON.\n"
             f"stdout (first 500 chars): {stdout[:500]}\n"

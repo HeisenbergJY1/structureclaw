@@ -27,8 +27,14 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def _emit_json(payload: dict) -> None:
-    """Write the final result JSON to stdout (the ONLY stdout we produce)."""
-    print(json.dumps(payload, ensure_ascii=False))
+    """Write the final result JSON to stdout (the ONLY stdout we produce).
+
+    Flush stderr first so any YJKAPI noise that leaked to stdout is
+    already written, then write our JSON on its own line.
+    """
+    sys.stderr.flush()
+    sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
 
 
 def _error(message: str) -> None:
@@ -123,7 +129,15 @@ def main() -> int:
 
 def _run(model_path: str, work_dir: str, yjks_root: str) -> int:
     # -- Import YJKAPI (requires sys.path set up by _setup_paths) ------
-    from YJKAPI import ControlConfig, YJKSControl
+    # Redirect stdout during import so any YJKAPI banner/init messages
+    # go to stderr and don't corrupt our JSON output channel.
+    import io
+    _real_stdout = sys.stdout
+    sys.stdout = io.TextIOWrapper(sys.stderr.buffer, encoding=sys.stderr.encoding or "utf-8")
+    try:
+        from YJKAPI import ControlConfig, YJKSControl
+    finally:
+        sys.stdout = _real_stdout
 
     # -- Read V2 model JSON ---------------------------------------------
     with open(model_path, "r", encoding="utf-8") as f:
