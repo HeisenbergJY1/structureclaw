@@ -509,9 +509,9 @@ class AnalysisEngineRegistry:
         return None
 
     def _yjk_unavailable_reason(self) -> Optional[str]:
-        yjk_path = os.getenv("YJK_PATH", "").strip()
+        yjk_path = (os.getenv("YJK_PATH", "").strip() or os.getenv("YJKS_ROOT", "").strip())
         if not yjk_path:
-            return "YJK is not configured (YJK_PATH not set)"
+            return "YJK is not configured (set YJKS_ROOT or YJK_PATH to the install root)"
         yjk_root = Path(yjk_path)
         if not yjk_root.exists():
             return f"YJK installation not found at {yjk_path}"

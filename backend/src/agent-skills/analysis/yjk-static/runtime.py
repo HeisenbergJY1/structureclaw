@@ -6,14 +6,15 @@ project's own venv Python and therefore cannot import YJKAPI directly.
 
 Environment variables
 ---------------------
-YJK_PATH : str
-    YJK installation root directory (e.g. ``D:\\YJKS\\YJKS_8_0_0``).
-    Used to derive ``yjks.exe`` and ``Python310/python.exe`` paths.
+YJKS_ROOT or YJK_PATH : str
+    YJK 8.0 installation root (``yjks.exe`` and ``Python310`` live here).
+    The official YJK SDK samples use ``YJKS_ROOT``; ``YJK_PATH`` is an
+    alias supported for compatibility.
 YJKS_EXE : str, optional
-    Direct path to ``yjks.exe``.  Overrides YJK_PATH derivation.
+    Direct path to ``yjks.exe``.  Overrides root-directory derivation.
 YJK_PYTHON_BIN : str, optional
     Direct path to YJK's Python 3.10 interpreter.
-    Defaults to ``<YJK_PATH>/Python310/python.exe``.
+    Defaults to ``<install_root>/Python310/python.exe``.
 YJK_WORK_DIR : str, optional
     Base directory for YJK project files.
     Defaults to ``<tempdir>/yjk_projects``.
@@ -35,25 +36,30 @@ from typing import Any, Dict
 from contracts import EngineNotAvailableError
 
 
+def _yjk_install_root() -> str:
+    """Resolve install root: ``YJK_PATH`` if set, else ``YJKS_ROOT``."""
+    return (os.getenv("YJK_PATH", "").strip() or os.getenv("YJKS_ROOT", "").strip())
+
+
 def _resolve_yjk_python() -> str:
     """Return the path to YJK's bundled Python 3.10 executable."""
     explicit = os.getenv("YJK_PYTHON_BIN", "").strip()
     if explicit and Path(explicit).is_file():
         return explicit
 
-    yjk_path = os.getenv("YJK_PATH", "").strip()
-    if not yjk_path:
+    root = _yjk_install_root()
+    if not root:
         raise EngineNotAvailableError(
             engine="yjk",
-            reason="YJK_PATH environment variable is not set",
+            reason="YJK install root not set (set YJKS_ROOT or YJK_PATH)",
         )
-    if not Path(yjk_path).is_dir():
+    if not Path(root).is_dir():
         raise EngineNotAvailableError(
             engine="yjk",
-            reason=f"YJK_PATH directory does not exist: {yjk_path}",
+            reason=f"YJK install directory does not exist: {root}",
         )
 
-    python_exe = Path(yjk_path) / "Python310" / "python.exe"
+    python_exe = Path(root) / "Python310" / "python.exe"
     if not python_exe.is_file():
         raise EngineNotAvailableError(
             engine="yjk",
@@ -102,12 +108,12 @@ def run_analysis(model: Dict[str, Any], parameters: Dict[str, Any]) -> Dict[str,
         raise RuntimeError(f"YJK driver script not found: {driver_path}")
 
     # Build environment for the subprocess.
-    # Pass through relevant YJK env vars and ensure YJKS_ROOT is set.
+    # Ensure both YJKS_ROOT and YJK_PATH are set for SDK scripts / driver.
     env = os.environ.copy()
-    yjk_path = os.getenv("YJK_PATH", "").strip()
-    if yjk_path:
-        env.setdefault("YJKS_ROOT", yjk_path)
-        env.setdefault("YJK_PATH", yjk_path)
+    root = _yjk_install_root()
+    if root:
+        env.setdefault("YJKS_ROOT", root)
+        env.setdefault("YJK_PATH", root)
     for key in ("YJKS_EXE", "YJK_VERSION", "YJK_PYTHON_BIN"):
         val = os.getenv(key, "").strip()
         if val:
