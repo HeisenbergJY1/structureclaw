@@ -128,6 +128,114 @@ def _extract_last_json(text: str) -> dict | None:
     return None
 
 
+def _ensure_v2_model(model_dict: dict) -> dict:
+    """Convert a V1 model dict to V2-compatible format for the YJK converter.
+
+    The YJK converter expects V2 fields (stories, V2-style sections with
+    width/height, materials with category).  V1 models from draft_model
+    lack these.  This function synthesizes the missing V2 fields from V1
+    data so the converter can proceed.
+    """
+    if model_dict.get("schema_version", "").startswith("2"):
+        return model_dict
+
+    from copy import deepcopy
+    v2 = deepcopy(model_dict)
+    v2["schema_version"] = "2.0.0"
+
+    # --- Synthesize stories from node Z coordinates ---
+    nodes = v2.get("nodes", [])
+    if not v2.get("stories") and nodes:
+        z_vals = sorted({round(float(n.get("z", 0)), 3) for n in nodes})
+        # Filter out z=0 (ground) and derive story heights from Z gaps
+        elevations = [z for z in z_vals if z > 0]
+        if not elevations:
+            # Single-story: use max Z as story height
+            max_z = max((float(n.get("z", 0)) for n in nodes), default=3.0)
+            if max_z > 0:
+                elevations = [max_z]
+            else:
+                elevations = [3.0]
+
+        stories = []
+        prev_elev = 0.0
+        for i, elev in enumerate(elevations):
+            story_id = f"F{i + 1}"
+            height = round(elev - prev_elev, 3)
+            if height <= 0:
+                height = 3.0
+            stories.append({
+                "id": story_id,
+                "height": height,
+                "elevation": elev,
+                "floor_loads": [
+                    {"type": "dead", "value": 5.0},
+                    {"type": "live", "value": 2.0},
+                ],
+            })
+            prev_elev = elev
+        v2["stories"] = stories
+
+        # Assign story ids to nodes based on Z
+        elev_to_story = {}
+        for s in stories:
+            elev_to_story[round(s["elevation"], 3)] = s["id"]
+        for n in v2.get("nodes", []):
+            nz = round(float(n.get("z", 0)), 3)
+            if nz in elev_to_story and not n.get("story"):
+                n["story"] = elev_to_story[nz]
+
+    # --- Enrich materials with category ---
+    for mat in v2.get("materials", []):
+        if not mat.get("category"):
+            name = (mat.get("name", "") or "").lower()
+            if any(k in name for k in ("steel", "钢", "q235", "q345", "q355", "q390", "q420")):
+                mat["category"] = "steel"
+            elif any(k in name for k in ("concrete", "混凝土", "c20", "c25", "c30", "c35", "c40")):
+                mat["category"] = "concrete"
+            else:
+                # Default to steel for YJK steel frame workflow
+                mat["category"] = "steel"
+
+    # --- Enrich sections with width/height from properties ---
+    for sec in v2.get("sections", []):
+        props = sec.get("properties", {})
+        if not sec.get("width") and "B" in props:
+            sec["width"] = float(props["B"])
+        if not sec.get("height") and "H" in props:
+            sec["height"] = float(props["H"])
+        if not sec.get("width") and "b" in props:
+            sec["width"] = float(props["b"])
+        if not sec.get("height") and "h" in props:
+            sec["height"] = float(props["h"])
+        # Ensure A/Iy are not the only properties (converter needs shape info)
+        if not sec.get("width") and not sec.get("height"):
+            a = props.get("A", 0)
+            if a and not props.get("B") and not props.get("H"):
+                # Approximate rectangular from area
+                import math
+                side = round(math.sqrt(float(a)) * 1000, 0)  # m² -> mm
+                if side > 0:
+                    sec["width"] = side
+                    sec["height"] = side
+
+    # --- Enrich elements with column type based on orientation ---
+    for elem in v2.get("elements", []):
+        if elem.get("type") == "beam":
+            node_map = {n["id"]: n for n in v2.get("nodes", [])}
+            nids = elem.get("nodes", [])
+            if len(nids) >= 2:
+                n1 = node_map.get(nids[0], {})
+                n2 = node_map.get(nids[1], {})
+                dz = abs(float(n2.get("z", 0)) - float(n1.get("z", 0)))
+                dx = abs(float(n2.get("x", 0)) - float(n1.get("x", 0)))
+                dy = abs(float(n2.get("y", 0)) - float(n1.get("y", 0)))
+                if dz > 0 and dz >= max(dx, dy):
+                    elem["type"] = "column"
+
+    return v2
+
+
 def run_analysis(model: Dict[str, Any], parameters: Dict[str, Any]) -> Dict[str, Any]:
     """Entry point called by the analysis registry.
 
@@ -150,6 +258,8 @@ def run_analysis(model: Dict[str, Any], parameters: Dict[str, Any]) -> Dict[str,
     # Write V2 model JSON to work directory.
     # `model` may arrive as a Pydantic object (StructureModelV1); serialize it first.
     model_dict = model.model_dump(mode="json") if hasattr(model, "model_dump") else model
+    # The YJK converter expects V2 format. If the model is V1, convert it.
+    model_dict = _ensure_v2_model(model_dict)
     model_path = work_dir / "model.json"
     model_path.write_text(json.dumps(model_dict, ensure_ascii=False), encoding="utf-8")
 
