@@ -752,7 +752,10 @@ export class AgentService {
       orchestrationMode: 'directed',
       modelInput,
       sourceFormat: params.context?.modelFormat || 'structuremodel-v1',
-      autoAnalyze: params.context?.autoAnalyze ?? true,
+      autoAnalyze: params.context?.autoAnalyze ?? (
+        this.policy.inferExecutionIntent(params.message ?? '')
+        || this.policy.inferProceedIntent(params.message ?? '')
+      ),
       analysisParameters: params.context?.parameters || {},
       skillIds,
       activeSkillIds,
