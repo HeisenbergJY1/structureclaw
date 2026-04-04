@@ -3029,6 +3029,7 @@ export class AgentService {
     } = args;
 
     const analysisResultData = analyzed?.success ? (analyzed as Record<string, unknown>)['data'] : undefined;
+    const analysisSummary = analyzed?.success ? (analyzed as Record<string, unknown>)['summary'] : undefined;
     const response = await this.renderSummary(
       params.message,
       this.localize(
@@ -3043,6 +3044,7 @@ export class AgentService {
       locale,
       analysisResultData,
       sessionKey,
+      analysisSummary,
     );
 
     if (sessionKey) {
@@ -4277,13 +4279,19 @@ export class AgentService {
     return artifacts;
   }
 
-  private async renderSummary(message: string, fallback: string, locale: AppLocale, analysisData?: unknown, conversationId?: string): Promise<string> {
+  private async renderSummary(message: string, fallback: string, locale: AppLocale, analysisData?: unknown, conversationId?: string, analysisSummary?: unknown): Promise<string> {
     if (!this.llm) {
       return fallback;
     }
 
     try {
       const hasData = analysisData && typeof analysisData === 'object';
+      const summaryObj = analysisSummary && typeof analysisSummary === 'object'
+        ? analysisSummary as Record<string, unknown>
+        : undefined;
+      const engineId = typeof summaryObj?.['engine'] === 'string' ? summaryObj['engine'] : '';
+      const isYjkEngine = engineId.startsWith('yjk');
+
       let conversationContext = '';
       if (conversationId) {
         try {
@@ -4305,10 +4313,37 @@ export class AgentService {
       }
       const promptParts = [
         this.localize(locale, '你是结构工程 Agent 的结果解释器。', 'You explain results produced by the structural engineering agent.'),
-        hasData
-          ? this.localize(locale, '请用中文在 250 字以内，根据用户意图从分析数据中提取用户关心的结果并回答。只引用数据中存在的数值，不要杜撰。若用户询问的数据未在当前分析数据中提供，请明确说明，并引导用户查看结构化数据结果与可视化界面。', 'Respond in English within 250 words. Extract and present the results the user cares about from the analysis data. Only cite values present in the data; do not invent data. If the requested value is not available in the current analysis data, say so clearly and direct the user to the structured results and visualization view.')
-          : this.localize(locale, '请用中文在 80 字以内给出结论，不要杜撰未出现的数据。', 'Respond in English within 80 words and do not invent data that was not provided.'),
       ];
+
+      if (isYjkEngine) {
+        const yjkProject = typeof summaryObj?.['yjk_project'] === 'string' ? summaryObj['yjk_project'] : '';
+        const workDir = typeof summaryObj?.['work_dir'] === 'string' ? summaryObj['work_dir'] : '';
+        promptParts.push(
+          this.localize(
+            locale,
+            '本次分析使用了盈建科（YJK）引擎。YJK 已完成整体计算，计算结果保存在 YJK 工程中。'
+              + '你必须在回复中明确告知用户：1) YJK 计算已完成；2) 请切换到 YJK 软件窗口查看详细的设计结果、配筋、位移等；3) 提供 YJK 工程文件路径。'
+              + '不要杜撰具体的计算数值，因为结构化结果提取尚未实现。'
+              + (yjkProject ? `\nYJK 工程路径：${yjkProject}` : '')
+              + (workDir ? `\n工作目录：${workDir}` : ''),
+            'This analysis used the YJK (盈建科) engine. YJK has completed the full design calculation and results are saved in the YJK project. '
+              + 'You MUST tell the user: 1) YJK calculation is complete; 2) switch to the YJK application window to review detailed design results, reinforcement, displacements, etc.; 3) provide the YJK project file path. '
+              + 'Do NOT invent specific numerical results since structured result extraction is not yet implemented.'
+              + (yjkProject ? `\nYJK project path: ${yjkProject}` : '')
+              + (workDir ? `\nWork directory: ${workDir}` : ''),
+          ),
+        );
+        promptParts.push(
+          this.localize(locale, '请用中文在 200 字以内回复。', 'Respond in English within 200 words.'),
+        );
+      } else {
+        promptParts.push(
+          hasData
+            ? this.localize(locale, '请用中文在 250 字以内，根据用户意图从分析数据中提取用户关心的结果并回答。只引用数据中存在的数值，不要杜撰。若用户询问的数据未在当前分析数据中提供，请明确说明，并引导用户查看结构化数据结果与可视化界面。', 'Respond in English within 250 words. Extract and present the results the user cares about from the analysis data. Only cite values present in the data; do not invent data. If the requested value is not available in the current analysis data, say so clearly and direct the user to the structured results and visualization view.')
+            : this.localize(locale, '请用中文在 80 字以内给出结论，不要杜撰未出现的数据。', 'Respond in English within 80 words and do not invent data that was not provided.'),
+        );
+      }
+
       if (conversationContext) {
         promptParts.push(this.localize(locale, `对话上下文：\n${conversationContext}`, `Conversation context:\n${conversationContext}`));
       }
@@ -4316,7 +4351,7 @@ export class AgentService {
         this.localize(locale, `用户意图：${message}`, `User intent: ${message}`),
         this.localize(locale, `系统结果：${fallback}`, `System result: ${fallback}`),
       );
-      if (hasData) {
+      if (hasData && !isYjkEngine) {
         const dataObj = analysisData as Record<string, unknown>;
         const compact = JSON.stringify({
           analysisMode: dataObj['analysisMode'] ?? null,
