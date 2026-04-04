@@ -35,15 +35,24 @@ describe('analysis skill registry', () => {
   });
 
   test('should derive runtime adapter keys from builtin analysis engines', () => {
-    expect(BUILTIN_ANALYSIS_ENGINES.map((engine) => engine.id)).toEqual([
+    const engineIds = BUILTIN_ANALYSIS_ENGINES.map((engine) => engine.id);
+    // Core engines always present
+    expect(engineIds).toContain('builtin-opensees');
+    expect(engineIds).toContain('builtin-simplified');
+    // Commercial engines present when their skill directories exist
+    expect(engineIds).toContain('builtin-pkpm');
+    expect(engineIds).toContain('builtin-yjk');
+    // Order: opensees first (priority 100), pkpm (90), yjk (85), simplified last (10)
+    expect(engineIds).toEqual([
       'builtin-opensees',
+      'builtin-pkpm',
+      'builtin-yjk',
       'builtin-simplified',
     ]);
-    expect(BUILTIN_ANALYSIS_RUNTIME_ADAPTER_KEYS).toEqual([
-      'builtin-opensees',
-      'builtin-simplified',
-    ]);
-    expect(BUILTIN_ANALYSIS_ENGINES[0].skillIds).toContain('opensees-static');
-    expect(BUILTIN_ANALYSIS_ENGINES[1].skillIds).toContain('simplified-static');
+    expect(BUILTIN_ANALYSIS_RUNTIME_ADAPTER_KEYS).toEqual(engineIds);
+    expect(BUILTIN_ANALYSIS_ENGINES.find((e) => e.id === 'builtin-opensees')?.skillIds).toContain('opensees-static');
+    expect(BUILTIN_ANALYSIS_ENGINES.find((e) => e.id === 'builtin-simplified')?.skillIds).toContain('simplified-static');
+    expect(BUILTIN_ANALYSIS_ENGINES.find((e) => e.id === 'builtin-pkpm')?.skillIds).toContain('pkpm-static');
+    expect(BUILTIN_ANALYSIS_ENGINES.find((e) => e.id === 'builtin-yjk')?.skillIds).toContain('yjk-static');
   });
 });
