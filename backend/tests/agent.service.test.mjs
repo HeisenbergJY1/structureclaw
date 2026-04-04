@@ -1108,7 +1108,7 @@ describe('AgentService orchestration', () => {
     expect(result.model?.metadata?.name).toBe('new-beam-model');
   });
 
-  test('should prefetch skill draft before planner and expose hasModel=true in planner context', async () => {
+  test('should run planner first then draft model via skill extraction on tool_call path', async () => {
     const svc = createServiceWithDefaultSkills();
     let plannerCalled = 0;
 
@@ -1118,13 +1118,12 @@ describe('AgentService orchestration', () => {
         if (text.includes('Return strict JSON only')) {
           plannerCalled += 1;
           expect(text).toContain('User message: 设计一个简支梁，跨度10m，梁中间荷载1kN');
-          expect(text).toContain('"hasModel":true');
+          expect(text).toContain('"hasModel":false');
           return {
             content: JSON.stringify({
               kind: 'tool_call',
               replyMode: null,
-              toolId: 'draft_model',
-              reason: 'model draft is already prepared and should continue through tool pipeline',
+              reason: 'user explicitly asked to design a beam with sufficient parameters',
             }),
           };
         }
@@ -1174,7 +1173,7 @@ describe('AgentService orchestration', () => {
     };
 
     const result = await svc.run({
-      conversationId: 'conv-prefetch-before-planner',
+      conversationId: 'conv-planner-first-then-draft',
       message: '设计一个简支梁，跨度10m，梁中间荷载1kN',
       context: {
         locale: 'zh',
@@ -1878,7 +1877,7 @@ describe('AgentService orchestration', () => {
     expect(draft.missingFields).toEqual(['inferredType']);
   });
 
-  test('should let generic refine the structural draft only from llm patch output', async () => {
+  test('should let generic extract only inferredType from llm patch output (metadata-only)', async () => {
     const svc = createServiceWithDefaultSkills();
     svc.llm = {
       invoke: async () => ({
@@ -1906,13 +1905,13 @@ describe('AgentService orchestration', () => {
     );
 
     expect(draft.extractionMode).toBe('llm');
-    expect(draft.inferredType).toBe('unknown');
-    expect(draft.stateToPersist?.inferredType).toBe('unknown');
-    expect(draft.stateToPersist?.frameDimension).toBe('3d');
-    expect(draft.stateToPersist?.storyCount).toBe(3);
-    expect(draft.stateToPersist?.bayCountX).toBe(4);
-    expect(draft.stateToPersist?.bayCountY).toBe(3);
-    expect(draft.model).toBeUndefined();
+    expect(draft.inferredType).toBe('frame');
+    expect(draft.stateToPersist?.inferredType).toBe('frame');
+    expect(draft.stateToPersist?.skillId).toBe('generic');
+    expect(draft.stateToPersist?.frameDimension).toBeUndefined();
+    expect(draft.stateToPersist?.storyCount).toBeUndefined();
+    expect(draft.stateToPersist?.bayCountX).toBeUndefined();
+    expect(draft.stateToPersist?.bayCountY).toBeUndefined();
   });
 
   test('should let generic keep unknown draft type and still return a full llm-built beam model', async () => {
@@ -1975,8 +1974,8 @@ describe('AgentService orchestration', () => {
     );
 
     expect(callCount).toBe(2);
-    expect(draft.inferredType).toBe('unknown');
-    expect(draft.stateToPersist?.inferredType).toBe('unknown');
+    expect(draft.inferredType).toBe('beam');
+    expect(draft.stateToPersist?.inferredType).toBe('beam');
     expect(draft.stateToPersist?.skillId).toBe('generic');
     expect(draft.model?.elements).toHaveLength(10);
     expect(draft.model?.nodes).toHaveLength(11);
@@ -2318,7 +2317,7 @@ describe('AgentService orchestration', () => {
       context: { locale: 'zh' },
     });
 
-    expect(first.interaction?.missingCritical).not.toContain('各层节点荷载（kN）');
+    expect(first.interaction?.missingCritical).not.toContain('各层总荷载（kN）');
 
     const second = await svc.runChatOnly({
       conversationId: 'conv-frame-generic-horizontal-3d',
@@ -2327,7 +2326,7 @@ describe('AgentService orchestration', () => {
     });
 
     const loads = second.model?.load_cases?.[0]?.loads ?? [];
-    expect(second.interaction?.missingCritical).not.toContain('各层节点荷载（kN）');
+    expect(second.interaction?.missingCritical).not.toContain('各层总荷载（kN）');
     expect(loads).toHaveLength(12);
     expect(loads.every((load) => typeof load.fx === 'number' && typeof load.fz === 'number')).toBe(true);
   });
@@ -2572,7 +2571,7 @@ describe('AgentService orchestration', () => {
 
     expect(second.interaction?.missingCritical).toContain('X向跨数');
     expect(second.interaction?.missingCritical).toContain('Y向跨数');
-    expect(second.interaction?.missingCritical).not.toContain('各层节点荷载（kN）');
+    expect(second.interaction?.missingCritical).not.toContain('各层总荷载（kN）');
   });
 
   test('should accumulate frame follow-up phrases for story heights and lateral loads', async () => {
@@ -2586,7 +2585,7 @@ describe('AgentService orchestration', () => {
     });
 
     expect(first.interaction?.missingCritical).toContain('各层层高（m）');
-    expect(first.interaction?.missingCritical).toContain('各层节点荷载（kN）');
+    expect(first.interaction?.missingCritical).toContain('各层总荷载（kN）');
 
     const second = await svc.runChatOnly({
       conversationId: 'conv-frame-natural-followup',
@@ -2595,7 +2594,7 @@ describe('AgentService orchestration', () => {
     });
 
     expect(second.interaction?.missingCritical).not.toContain('各层层高（m）');
-    expect(second.interaction?.missingCritical).toContain('各层节点荷载（kN）');
+    expect(second.interaction?.missingCritical).toContain('各层总荷载（kN）');
 
     const third = await svc.runChatOnly({
       conversationId: 'conv-frame-natural-followup',
@@ -2604,7 +2603,7 @@ describe('AgentService orchestration', () => {
     });
 
     expect(third.interaction?.missingCritical).not.toContain('各层层高（m）');
-    expect(third.interaction?.missingCritical).not.toContain('各层节点荷载（kN）');
+    expect(third.interaction?.missingCritical).not.toContain('各层总荷载（kN）');
     expect(third.interaction?.state).toBe('ready');
   });
 
@@ -2794,7 +2793,7 @@ describe('AgentService orchestration', () => {
       context: { locale: 'zh' },
     });
 
-    expect(first.interaction?.missingCritical).not.toContain('各层节点荷载（kN）');
+    expect(first.interaction?.missingCritical).not.toContain('各层总荷载（kN）');
     expect(first.model).toBeUndefined();
 
     const second = await svc.runChatOnly({
@@ -2817,7 +2816,7 @@ describe('AgentService orchestration', () => {
       context: { locale: 'zh' },
     });
 
-    expect(first.interaction?.missingCritical).not.toContain('各层节点荷载（kN）');
+    expect(first.interaction?.missingCritical).not.toContain('各层总荷载（kN）');
     expect(first.model?.load_cases?.[0]?.loads).toHaveLength(12);
     expect(first.model?.load_cases?.[0]?.loads.every((load) => typeof load.fy === 'number' && typeof load.fx === 'number' && load.fz === undefined)).toBe(true);
 
@@ -2828,11 +2827,28 @@ describe('AgentService orchestration', () => {
     });
 
     const loads = second.model?.load_cases?.[0]?.loads ?? [];
-    expect(second.interaction?.missingCritical).not.toContain('各层节点荷载（kN）');
+    expect(second.interaction?.missingCritical).not.toContain('各层总荷载（kN）');
     expect(loads).toHaveLength(12);
     expect(loads.every((load) => typeof load.fy === 'number' && typeof load.fx === 'number' && typeof load.fz === 'number')).toBe(true);
     expect(second.model?.metadata?.bayCountX).toBe(2);
     expect(second.model?.metadata?.bayCountY).toBe(1);
+  });
+
+  test('should parse 竖直方向 load phrasing for per-floor total loads', async () => {
+    const svc = createServiceWithDefaultSkills();
+    svc.llm = null;
+
+    const result = await svc.runChatOnly({
+      conversationId: 'conv-frame-vertical-direction-zh',
+      message: '3D框架，2层，x向2跨每跨6m，y向1跨每跨5m，每层3m，各层竖直方向荷载都是200kN，x向和y向都是20kN',
+      context: { locale: 'zh' },
+    });
+
+    expect(result.interaction?.missingCritical).not.toContain('各层总荷载（kN）');
+    expect(result.model).toBeDefined();
+    const loads = result.model?.load_cases?.[0]?.loads ?? [];
+    expect(loads.length).toBeGreaterThan(0);
+    expect(loads.every((load) => typeof load.fy === 'number')).toBe(true);
   });
 
   test('should expose a conversation session snapshot for context restoration', async () => {
@@ -2898,7 +2914,7 @@ describe('AgentService orchestration', () => {
     expect(result.success).toBe(true);
     expect(result.interaction?.stage).toBe('model');
     expect(result.interaction?.missingCritical).toContain('层数');
-    expect(result.interaction?.missingCritical).toContain('各层节点荷载（kN）');
+    expect(result.interaction?.missingCritical).toContain('各层总荷载（kN）');
   });
 
   test('should advance chat guidance to load stage once portal geometry is known', async () => {

@@ -69,10 +69,6 @@ export const config = {
   // Redis 配置
   redisUrl: redisEnabled ? redisUrlRaw! : '',
 
-  // JWT 配置
-  jwtSecret: process.env.JWT_SECRET || 'your-super-secret-jwt-key',
-  jwtExpiresIn: process.env.JWT_EXPIRES_IN || '7d',
-
   // AI 配置
   llmProvider,
   llmApiKey,
@@ -96,6 +92,10 @@ export const config = {
 
   // 日志级别
   logLevel: process.env.LOG_LEVEL || 'info',
+
+  // LLM 调用日志
+  llmLogEnabled: process.env.LLM_LOG_ENABLED !== 'false',
+  llmLogDir: process.env.LLM_LOG_DIR || '',
 };
 
 export type Config = typeof config;

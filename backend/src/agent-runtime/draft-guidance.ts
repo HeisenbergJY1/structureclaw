@@ -1,9 +1,6 @@
 import type { AppLocale } from '../services/locale.js';
 import type { DraftState } from './types.js';
-
-function localize(locale: AppLocale, zh: string, en: string): string {
-  return locale === 'zh' ? zh : en;
-}
+import { localize } from './plugin-helpers.js';
 
 export function computeMissingCriticalKeys(state: DraftState): string[] {
   const missing: string[] = [];
@@ -129,7 +126,7 @@ export function mapMissingFieldLabels(missing: string[], locale: AppLocale): str
       case 'bayWidthsYM':
         return localize(locale, 'Y向各跨跨度（m）', 'Bay widths in Y (m)');
       case 'floorLoads':
-        return localize(locale, '各层节点荷载（kN）', 'Per-floor nodal loads (kN)');
+        return localize(locale, '各层总荷载（kN）', 'Per-floor total loads (kN)');
       case 'loadKN':
         return localize(locale, '荷载大小（kN）', 'Load magnitude (kN)');
       case 'loadType':
