@@ -214,6 +214,10 @@ def convert_v2_to_ydb(
 
     Returns the absolute path to the generated .ydb.
     """
+    import sys
+    def _log(msg: str) -> None:
+        print(f"[yjk_converter] {msg}", file=sys.stderr, flush=True)
+
     os.makedirs(work_dir, exist_ok=True)
     warnings: list[str] = []
 
@@ -227,11 +231,14 @@ def convert_v2_to_ydb(
     first_story = stories[0]
     height_mm = int(round(float(first_story["height"]) * M_TO_MM))
     dead, live = _get_floor_loads(first_story)
+    _log(f"Story height: {height_mm}mm, dead={dead}, live={live}")
 
     data_func = DataFunc()
     std_flr = data_func.StdFlr_Generate(height_mm, dead, live)
+    _log(f"StdFlr_Generate returned: {std_flr}")
 
     section_roles = _infer_section_roles(data)
+    _log(f"Section roles: {section_roles}")
 
     col_defs: dict[str, Any] = {}
     beam_defs: dict[str, Any] = {}
@@ -245,19 +252,27 @@ def convert_v2_to_ydb(
         mat = _resolve_mat_type(sec, data)
 
         kind, shape_val, name = _build_shape_val(sec, kind)
+        _log(f"Section '{sec_id}' ({role}): mat={mat}, kind={kind}, shape_val='{shape_val}', name='{name}'")
 
         try:
             if role == "column":
-                col_defs[sec_id] = data_func.ColSect_Def(mat, kind, shape_val, name)
+                result = data_func.ColSect_Def(mat, kind, shape_val, name)
+                col_defs[sec_id] = result
+                _log(f"  ColSect_Def returned: {result}")
             else:
-                beam_defs[sec_id] = data_func.BeamSect_Def(mat, kind, shape_val, name)
+                result = data_func.BeamSect_Def(mat, kind, shape_val, name)
+                beam_defs[sec_id] = result
+                _log(f"  BeamSect_Def returned: {result}")
         except Exception as exc:
+            _log(f"  ERROR: Section '{sec_id}' definition failed: {exc}")
             warnings.append(f"Section '{sec_id}' definition failed: {exc}")
 
     if not col_defs:
+        _log("WARNING: No column sections defined; using fallback")
         col_defs["_fallback_col"] = data_func.ColSect_Def(5, 2, "20,650,400,28,400,28")
         warnings.append("No column sections defined; using default steel I-section")
     if not beam_defs:
+        _log("WARNING: No beam sections defined; using fallback")
         beam_defs["_fallback_beam"] = data_func.BeamSect_Def(5, 2, "18,900,300,26,300,26")
         warnings.append("No beam sections defined; using default steel I-section")
 
@@ -266,25 +281,60 @@ def convert_v2_to_ydb(
         raise ValueError("V2 model has no nodes")
 
     xspans, yspans = _extract_grid_spans(nodes)
+    _log(f"Grid spans: xspans={xspans}, yspans={yspans}")
 
     nodelist = data_func.node_generate(xspans, yspans, std_flr)
+    _log(f"node_generate returned: {nodelist} (type: {type(nodelist)})")
 
     first_col = next(iter(col_defs.values()))
-    data_func.column_arrange(nodelist, first_col)
+    _log(f"Arranging columns with section: {first_col}")
+    try:
+        col_result = data_func.column_arrange(nodelist, first_col)
+        _log(f"column_arrange returned: {col_result}")
+    except Exception as exc:
+        _log(f"ERROR: column_arrange failed: {exc}")
+        raise
 
     first_beam = next(iter(beam_defs.values()))
-    grid_x = data_func.grid_generate(nodelist, 0, 1)
-    grid_y = data_func.grid_generate(nodelist, 1, 0)
-    data_func.beam_arrange(grid_x, first_beam)
-    data_func.beam_arrange(grid_y, first_beam)
+    _log(f"Arranging beams with section: {first_beam}")
+    try:
+        grid_x = data_func.grid_generate(nodelist, 0, 1)
+        _log(f"grid_generate(0,1) returned: {grid_x}")
+        grid_y = data_func.grid_generate(nodelist, 1, 0)
+        _log(f"grid_generate(1,0) returned: {grid_y}")
+        beam_x_result = data_func.beam_arrange(grid_x, first_beam)
+        _log(f"beam_arrange(grid_x) returned: {beam_x_result}")
+        beam_y_result = data_func.beam_arrange(grid_y, first_beam)
+        _log(f"beam_arrange(grid_y) returned: {beam_y_result}")
+    except Exception as exc:
+        _log(f"ERROR: beam arrangement failed: {exc}")
+        raise
 
     n_stories = len(stories)
-    data_func.Floors_Assemb(0, std_flr, n_stories, height_mm)
+    _log(f"Assembling {n_stories} floors with height {height_mm}mm")
+    try:
+        data_func.Floors_Assemb(0, std_flr, n_stories, height_mm)
+        _log("Floors_Assemb completed")
+    except Exception as exc:
+        _log(f"ERROR: Floors_Assemb failed: {exc}")
+        raise
 
-    data_func.DbModel_Assign()
+    _log("Assigning model to database...")
+    try:
+        data_func.DbModel_Assign()
+        _log("DbModel_Assign completed")
+    except Exception as exc:
+        _log(f"ERROR: DbModel_Assign failed: {exc}")
+        raise
+
+    _log("Getting model data...")
     model = data_func.GetDbModelData()
+    _log(f"GetDbModelData returned: {model}")
+
+    _log(f"Creating YDB file: {ydb_filename}")
     reader = Hi_AddToAndReadYjk(model)
     reader.CreateYDB(work_dir, ydb_filename)
 
     ydb_path = os.path.join(work_dir, ydb_filename)
+    _log(f"YDB file created: {ydb_path}")
     return ydb_path
