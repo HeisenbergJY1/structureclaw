@@ -142,6 +142,7 @@ export interface AgentSkillMetadata {
   triggers: string[];
   stages: SkillStage[];
   autoLoadByDefault: boolean;
+  domain?: SkillDomain;
 }
 
 export interface AgentSkillFile extends AgentSkillMetadata {
