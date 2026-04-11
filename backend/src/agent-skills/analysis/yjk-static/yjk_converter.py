@@ -3,12 +3,31 @@
 
 Runs under YJK's bundled Python 3.10.  Imported by yjk_driver.py.
 
-Supported:
-  - Steel I-section (mat=5, kind=2): ShapeVal "tw,H,B1,tf1,B2,tf2"
-  - Steel tube      (mat=5, kind=8): ShapeVal "D,d"
-  - Concrete rect   (mat=6, kind=1): ShapeVal "B,H"
-  - Standard steel  (kind=26):       name lookup, e.g. "HW350X350"
-  - Concrete circle (mat=6, kind=3): ShapeVal "D"
+Supported section kinds (YJK 8.0 API):
+  Basic geometry:
+    kind=1  矩形        ShapeVal "B,H"
+    kind=2  工字形/H形   ShapeVal "tw,H,B,tf1,B2,tf2" (6 params)
+    kind=3  圆形        ShapeVal "D"
+    kind=4  正多边形     ShapeVal (per YJK docs)
+    kind=5  槽形        ShapeVal (per YJK docs)
+    kind=6  十字形       ShapeVal (per YJK docs)
+    kind=7  箱型        ShapeVal "B,H,U,T,D,F" (6 params; equal-thickness: B,H,t,t,t,t)
+    kind=8  圆管        ShapeVal "D,d" (outer, inner) or "D,t" (outer, wall)
+    kind=9  双槽形       ShapeVal (per YJK docs)
+    kind=10 十字工       ShapeVal (per YJK docs)
+    kind=11 梯形        ShapeVal (per YJK docs)
+    kind=28 L形         ShapeVal (per YJK docs)
+    kind=29 T形         ShapeVal (per YJK docs)
+  Composite / SRC:
+    kind=12 钢管混凝土   kind=13 工字劲   kind=14 箱形劲
+    kind=-14 方管混凝土  kind=15 十字劲
+    kind=24 带盖板钢组合  kind=25 组合截面
+  Tapered:
+    kind=21 矩形变截面   kind=22 H形变截面  kind=23 箱形变截面
+    kind=33 正多边形变截面 kind=52 工字劲变截面
+  Library:
+    kind=26 型钢 (热轧库截面, ShapeVal="", name=规格名)
+    kind=303 薄壁型钢    kind=304 薄壁型钢组合  kind=306 铝合金梁
 
 Unit conventions:
   V2 JSON coordinates: meters   -> YJK: mm  (multiply by 1000)
@@ -34,15 +53,42 @@ _CATEGORY_TO_MAT: dict[str, int] = {
 }
 
 # V2 section type string -> YJK section kind integer
+# Reference: YJK 8.0 建模接口说明 + 案例/二次开发
 _TYPE_TO_KIND: dict[str, int] = {
-    "rectangular": 1,
-    "I": 2,
-    "H": 2,
-    "circular": 3,
-    "box": 4,
-    "tube": 8,
-    "T": 5,
-    "L": 6,
+    # --- 基本型钢 / 几何截面 ---
+    "rectangular": 1,   # 矩形          ShapeVal "B,H"
+    "I": 2,             # 工字形         ShapeVal "tw,H,B,tf1,B2,tf2"
+    "H": 2,             # H形 (同工字形)
+    "circular": 3,      # 圆形          ShapeVal "D"
+    "polygon": 4,       # 正多边形
+    "channel": 5,       # 槽形
+    "cross": 6,         # 十字形
+    "box": 7,           # 箱型          ShapeVal "B,H,U,T,D,F" (等厚: B,H,t,t,t,t)
+    "tube": 8,          # 圆管          ShapeVal "D,d"
+    "double-channel": 9,  # 双槽形
+    "cross-I": 10,      # 十字工
+    "trapezoid": 11,    # 梯形
+    "L": 28,            # L形 (角钢)
+    "T": 29,            # T形
+    # --- 组合 / 劲性 / 钢管混凝土 ---
+    "CFT": 12,          # 钢管混凝土
+    "SRC-I": 13,        # 工字劲
+    "SRC-box": 14,      # 箱形劲
+    "CFT-square": -14,  # 方管混凝土
+    "SRC-cross": 15,    # 十字劲
+    "steel-cap": 24,    # 带盖板钢组合截面
+    "composite": 25,    # 组合截面
+    # --- 变截面 ---
+    "tapered-rect": 21,     # 矩形变截面
+    "tapered-H": 22,        # H形变截面
+    "tapered-box": 23,      # 箱形变截面
+    "tapered-polygon": 33,  # 正多边形变截面
+    "tapered-SRC-I": 52,    # 工字劲变截面
+    # --- 型钢库 / 薄壁 / 铝合金 ---
+    "standard": 26,     # 型钢 (热轧库截面, ShapeVal="", name=规格名)
+    "cold-formed": 303, # 薄壁型钢
+    "cold-formed-composite": 304,  # 薄壁型钢组合
+    "aluminum": 306,    # 铝合金梁截面
 }
 
 
@@ -88,14 +134,63 @@ def _resolve_mat_type(sec: dict, data: dict) -> int:
     return 5
 
 
+# --- Precise H-section lookup table (GB/T 11263 hot-rolled H-beams) ---
+# (H, B, tw, tf) in mm.
+_H_SECTION_DIMS: dict[str, tuple[int, int, int, int]] = {
+    # HW 宽翼缘 (H≈B)
+    "HW100X100": (100, 100, 6, 8),
+    "HW125X125": (125, 125, 6, 9),
+    "HW150X150": (150, 150, 7, 10),
+    "HW175X175": (175, 175, 7, 11),
+    "HW200X200": (200, 200, 8, 12),
+    "HW250X250": (250, 250, 9, 14),
+    "HW300X300": (300, 300, 10, 15),
+    "HW350X350": (350, 350, 12, 19),
+    "HW400X400": (400, 400, 13, 21),
+    # HN 窄翼缘
+    "HN150X75":  (150, 75, 5, 7),
+    "HN200X100": (200, 100, 5, 8),
+    "HN250X125": (250, 125, 6, 9),
+    "HN300X150": (300, 150, 6, 9),
+    "HN350X175": (350, 175, 7, 11),
+    "HN400X200": (400, 200, 8, 13),
+    "HN450X200": (450, 200, 9, 14),
+    "HN500X200": (500, 200, 10, 16),
+    "HN600X200": (600, 200, 11, 17),
+    "HN700X300": (700, 300, 13, 24),
+    "HN800X300": (800, 300, 14, 26),
+    "HN900X300": (900, 300, 16, 28),
+    # HM 中翼缘
+    "HM200X150": (200, 150, 6, 9),
+    "HM250X175": (250, 175, 7, 11),
+    "HM300X200": (300, 200, 8, 12),
+    "HM350X250": (350, 250, 9, 14),
+    "HM400X300": (400, 300, 10, 16),
+    "HM450X300": (450, 300, 11, 18),
+    "HM500X300": (500, 300, 11, 15),
+    "HM600X300": (600, 300, 12, 17),
+}
+
+
 def _build_shape_val(sec: dict, kind: int) -> tuple[int, str, str]:
     """Return (kind, ShapeVal, name) for a V2 section dict.
 
     Priority:
-      1. standard_steel_name -> kind=26 (with fallback to explicit geometry)
-      2. properties with detailed geometry -> build ShapeVal
-      3. top-level width/height -> rectangular fallback
+      1. standard_steel_name -> lookup in _H_SECTION_DIMS for exact geometry,
+         fallback to kind=26 library name
+      2. properties with detailed geometry -> build ShapeVal per kind
+      3. top-level width/height -> rectangular fallback (kind=1)
+
+    ShapeVal formats (YJK 8.0, verified from SDK examples):
+      kind=1  矩形:     "B,H"
+      kind=2  工字形:    "tw,H,B,tf1,B2,tf2"
+      kind=3  圆形:     "D"
+      kind=7  箱型:     "B,H,U,T,D,F" (等厚时 "B,H,t,t,t,t")
+      kind=8  圆管:     "D,d" (外径,内径)
+      kind=26 型钢库:   ShapeVal="", name=规格名
     """
+    import re
+
     props = sec.get("properties", {})
     extra = sec.get("extra", {})
 
@@ -105,31 +200,32 @@ def _build_shape_val(sec: dict, kind: int) -> tuple[int, str, str]:
         or ""
     )
 
-    # For standard steel names, try to extract dimensions as fallback
-    # YJK kind=26 requires exact name match in its steel library
-    # If the name doesn't match, we need explicit geometry
     if std_name:
-        # Try to parse HW/HN/HM dimensions from the name for fallback
-        import re
-        hw_match = re.match(r'^(HW|HN|HM|HP)(\d+)[Xx×](\d+)$', std_name, re.IGNORECASE)
+        normalized_name = std_name.upper().replace("\u00d7", "X").replace("x", "X")
+        # Try exact lookup first
+        dims = _H_SECTION_DIMS.get(normalized_name)
+        if dims:
+            H, B, tw, tf = dims
+            return 2, f"{tw},{H},{B},{tf},{B},{tf}", ""
+
+        # Try regex parse for names not in the table
+        hw_match = re.match(r"^(HW|HN|HM|HP|HT)(\d+)[Xx\u00d7](\d+)", std_name, re.IGNORECASE)
         if hw_match:
             prefix = hw_match.group(1).upper()
             H = int(hw_match.group(2))
             B = int(hw_match.group(3))
-            # Use explicit H-section geometry (kind=2) instead of name lookup
-            # This is more reliable than depending on YJK's steel library
-            # Estimate typical flange/web thickness based on section size
-            if prefix == "HW":  # Wide flange (H≈B)
+            if prefix == "HW":
                 tw = max(8, H // 30)
                 tf = max(12, H // 20)
-            elif prefix == "HN":  # Narrow flange
+            elif prefix == "HN":
                 tw = max(6, H // 40)
                 tf = max(9, H // 30)
-            else:  # HM, HP
+            else:
                 tw = max(7, H // 35)
                 tf = max(11, H // 25)
             return 2, f"{tw},{H},{B},{tf},{B},{tf}", ""
-        # If we can't parse, try kind=26 but it may fail
+
+        # Unrecognized standard name -> try kind=26 library lookup
         return 26, "", str(std_name)
 
     # PKPM-style shape dict
@@ -144,16 +240,22 @@ def _build_shape_val(sec: dict, kind: int) -> tuple[int, str, str]:
             B2 = shape.get("B2", B1)
             tf2 = shape.get("tf2", tf1)
             return 2, f"{int(tw)},{int(H)},{int(B1)},{int(tf1)},{int(B2)},{int(tf2)}", ""
-        if sk == "Box" or kind == 4:
-            H = shape.get("H", 400)
-            B = shape.get("B", 400)
-            T = shape.get("T", 20)
-            return 4, f"{int(H)},{int(B)},{int(T)}", ""
+        if sk == "Box" or kind == 7:
+            # kind=7 箱型: ShapeVal "B,H,U,T,D,F" (等厚时后四项相同)
+            H = shape.get("H", sec.get("height", 400))
+            B = shape.get("B", sec.get("width", 400))
+            t = shape.get("T", shape.get("t", 20))
+            U = shape.get("U", t)
+            T_val = shape.get("T_bottom", t)
+            D = shape.get("D", t)
+            F = shape.get("F", t)
+            return 7, f"{int(B)},{int(H)},{int(U)},{int(T_val)},{int(D)},{int(F)}", ""
         if sk == "Tube" or kind == 8:
             D = shape.get("D", 200)
             d = shape.get("d", D - 20)
             return 8, f"{int(D)},{int(d)}", ""
 
+    # --- Build ShapeVal from properties by kind ---
     if kind == 2:
         tw = props.get("tw", 10)
         H = props.get("H", sec.get("height", 400))
@@ -162,6 +264,13 @@ def _build_shape_val(sec: dict, kind: int) -> tuple[int, str, str]:
         B2 = props.get("B2", B1)
         tf2 = props.get("tf2", tf1)
         return 2, f"{int(tw)},{int(H)},{int(B1)},{int(tf1)},{int(B2)},{int(tf2)}", ""
+
+    if kind == 7:
+        # 箱型: "B,H,U,T,D,F"
+        H = props.get("H", sec.get("height", 400))
+        B = props.get("B", sec.get("width", 400))
+        t = props.get("t", props.get("T", 20))
+        return 7, f"{int(B)},{int(H)},{int(t)},{int(t)},{int(t)},{int(t)}", ""
 
     if kind == 8:
         D = props.get("D", sec.get("diameter", 200))
@@ -172,6 +281,7 @@ def _build_shape_val(sec: dict, kind: int) -> tuple[int, str, str]:
         D = sec.get("diameter") or props.get("D", 400)
         return 3, f"{int(D)}", ""
 
+    # Fallback: rectangular (kind=1) "B,H"
     w = sec.get("width") or props.get("B", 400)
     h = sec.get("height") or props.get("H", 600)
     return 1, f"{int(w)},{int(h)}", sec.get("name", "")
