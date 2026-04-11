@@ -182,12 +182,13 @@ def _ensure_v2_model(model_dict: dict) -> dict:
                 n["story"] = elev_to_story[nz]
 
     # --- Enrich materials with category ---
+    import re as _re_mat
     for mat in v2.get("materials", []):
         if not mat.get("category"):
-            name = (mat.get("name", "") or "").lower()
-            if any(k in name for k in ("steel", "钢", "q235", "q345", "q355", "q390", "q420")):
+            name = (mat.get("name", "") or "").upper()
+            if _re_mat.match(r'^(Q|S|A)\d', name) or "STEEL" in name or "钢" in name:
                 mat["category"] = "steel"
-            elif any(k in name for k in ("concrete", "混凝土", "c20", "c25", "c30", "c35", "c40")):
+            elif _re_mat.match(r'^C\d', name) or "CONCRETE" in name or "混凝土" in name:
                 mat["category"] = "concrete"
             else:
                 mat["category"] = "steel"
