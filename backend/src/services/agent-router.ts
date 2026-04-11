@@ -31,6 +31,66 @@ export type AssessInteractionNeedsFn = (
 export type HasEmptySkillSelectionFn = (skillIds?: string[]) => boolean;
 export type HasActiveToolFn = (activeToolIds: ActiveToolSet, toolId: string) => boolean;
 
+function localize(locale: AppLocale, zh: string, en: string): string {
+  return locale === 'zh' ? zh : en;
+}
+
+function extractHttpStatus(error: unknown): number | undefined {
+  const status = (error as any)?.response?.status;
+  return typeof status === 'number' ? status : undefined;
+}
+
+function stringifyError(error: unknown): string {
+  const unknownError = error as any;
+  const status = extractHttpStatus(error);
+  if (unknownError?.response?.data) {
+    const payload = typeof unknownError.response.data === 'string'
+      ? unknownError.response.data
+      : JSON.stringify(unknownError.response.data);
+    return status ? `HTTP ${status}: ${payload}` : payload;
+  }
+  if (unknownError?.message) {
+    return status ? `HTTP ${status}: ${String(unknownError.message)}` : String(unknownError.message);
+  }
+  return 'Unknown error';
+}
+
+function sanitizePlannerErrorDetail(detail: string): string {
+  const collapsed = detail.replace(/\s+/gu, ' ').trim();
+  if (!collapsed) {
+    return '';
+  }
+  return collapsed.length > 160 ? `${collapsed.slice(0, 157)}...` : collapsed;
+}
+
+function describeLlmPlannerError(error: unknown, locale: AppLocale): string {
+  const status = extractHttpStatus(error);
+  const raw = stringifyError(error);
+  const normalizedRaw = sanitizePlannerErrorDetail(raw.replace(/^HTTP \d+:\s*/u, ''));
+  const lowerRaw = normalizedRaw.toLowerCase();
+
+  if (
+    status === 403
+    && (lowerRaw.includes('not available in your region') || lowerRaw.includes('model_not_available'))
+  ) {
+    return localize(locale, 'LLM 403 / 模型区域不可用', 'LLM 403 / model unavailable in your region');
+  }
+  if (status === 401) {
+    return localize(locale, 'LLM 401 / API Key 无效或未授权', 'LLM 401 / invalid or unauthorized API key');
+  }
+  if (status === 429) {
+    return localize(locale, 'LLM 429 / 请求限流或额度不足', 'LLM 429 / rate limited or quota exceeded');
+  }
+  if (typeof status === 'number') {
+    return localize(
+      locale,
+      `LLM ${status} / ${normalizedRaw || '请求失败'}`,
+      `LLM ${status} / ${normalizedRaw || 'request failed'}`,
+    );
+  }
+  return normalizedRaw || localize(locale, 'LLM 不可用', 'LLM unavailable');
+}
+
 // ---------------------------------------------------------------------------
 // extractJsonObject
 // ---------------------------------------------------------------------------
@@ -204,24 +264,25 @@ export async function planNextStepWithLlm(
   assessInteractionNeeds: AssessInteractionNeedsFn,
 ): Promise<AgentNextStepPlan> {
   if (!llm) {
-    throw new Error('LLM_PLANNER_UNAVAILABLE');
+    throw new Error(`LLM_PLANNER_UNAVAILABLE:${localize(options.locale, 'LLM 不可用', 'LLM unavailable')}`);
   }
 
-  const snapshot = await buildPlannerContextSnapshot(options, assessInteractionNeeds);
-  const allowedKinds: AgentPlanKind[] = Array.isArray(options.allowedKinds) && options.allowedKinds.length > 0
-    ? options.allowedKinds
-    : ['reply', 'ask', 'tool_call'];
-  const allowToolCall = allowedKinds.includes('tool_call');
-  const availableToolIds = snapshot.availableToolIds.filter((toolId): toolId is AgentToolName => (
-    ['draft_model', 'update_model', 'convert_model', 'validate_model', 'run_analysis', 'run_code_check', 'generate_report'] as string[]
-  ).includes(toolId));
-  const prompt = [
+  try {
+    const snapshot = await buildPlannerContextSnapshot(options, assessInteractionNeeds);
+    const allowedKinds: AgentPlanKind[] = Array.isArray(options.allowedKinds) && options.allowedKinds.length > 0
+      ? options.allowedKinds
+      : ['reply', 'ask', 'tool_call'];
+    const allowToolCall = allowedKinds.includes('tool_call');
+    const availableToolIds = snapshot.availableToolIds.filter((toolId): toolId is AgentToolName => (
+      ['draft_model', 'update_model', 'convert_model', 'validate_model', 'run_analysis', 'run_code_check', 'generate_report'] as string[]
+    ).includes(toolId));
+    const prompt = [
     'You are the planning layer for StructureClaw.',
     'Decide the single best next step for the latest user message.',
     'Available skills and tools constrain what can be invoked, but they do not force invocation.',
     'If the user is greeting, chatting casually, or asking a non-execution question, choose reply.',
     allowToolCall
-      ? 'Do not choose tool_call just because drafting or analysis tools are available.'
+      ? 'Avoid tool_call for vague or exploratory messages, BUT when the user provides concrete structural parameters (dimensions, loads, materials) AND explicitly requests analysis, modeling, code checking, or calculation, ALWAYS choose tool_call.'
       : 'Tool invocation is not allowed in this planning mode. Choose only reply or ask.',
     'When there is an active engineering session with missing parameters, and the latest user message adds structure type, geometry, topology, material, section, load, support, or report details, do not choose a plain reply.',
     'In that situation, choose ask so the structured engineering session continues, unless the information is now complete enough that a structured reply is clearly better.',
@@ -234,6 +295,9 @@ export async function planNextStepWithLlm(
     'An existing context model is only reusable context. It must not override the latest user request by itself.',
     'If the latest message clearly asks for a new or different structural model, choose tool_call even when an older context model already exists.',
     'For requests like "建模一个简支梁，跨度10m，均布荷载1kN/m，可以用10个单元建模", prefer tool_call when the information is sufficient to attempt a first structural model draft.',
+    allowToolCall
+      ? 'Messages containing structural parameters AND analysis intent MUST produce kind=tool_call. Examples: "简支梁6米，均布荷载20kN/m，请进行静力分析", "2-story single-bay steel frame, story height 3.6m, bay 6m, floor load 10kN/m2, analyze and check", "门式刚架，跨度18m，高度7m，屋面荷载6kN/m，分析", "3层2跨框架，层高3.3m，跨度5.4m和6m，每层楼面荷载15kN/m，请分析".'
+      : '',
     'Use replyMode=plain only for casual chat, greetings, meta questions, or clearly non-engineering turns.',
     'Use replyMode=structured for engineering follow-ups that should stay grounded in the current structural context without immediately invoking tools.',
     'Choose ask when the user is pursuing an engineering task but key information is still missing.',
@@ -250,9 +314,8 @@ export async function planNextStepWithLlm(
     `Locale: ${options.locale}`,
     `User message: ${message}`,
     `Planner context: ${JSON.stringify(snapshot)}`,
-  ].join('\n');
+    ].join('\n');
 
-  try {
     const aiMessage = await llm.invoke(prompt);
     const raw = typeof aiMessage.content === 'string'
       ? aiMessage.content
@@ -272,8 +335,11 @@ export async function planNextStepWithLlm(
       planningDirective: 'auto',
       rationale: 'llm',
     };
-  } catch {
-    throw new Error('LLM_PLANNER_INVALID_RESPONSE');
+  } catch (error) {
+    if (error instanceof Error && error.message === 'LLM_PLANNER_INVALID_RESPONSE') {
+      throw error;
+    }
+    throw new Error(`LLM_PLANNER_UNAVAILABLE:${describeLlmPlannerError(error, options.locale)}`);
   }
 }
 

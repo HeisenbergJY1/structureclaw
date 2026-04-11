@@ -10,6 +10,10 @@
     "start": "node dist/index.js",
     "lint": "eslint \"src/**/*.{ts,tsx}\"",
     "test": "npm run db:generate && npm run build && cross-env NODE_OPTIONS=--experimental-vm-modules jest --passWithNoTests",
+    "test:skills": "npm run db:generate && npm run build && cross-env NODE_OPTIONS=--experimental-vm-modules jest --passWithNoTests --runInBand src/agent-skills/",
+    "test:skill:beam": "npm run db:generate && npm run build && cross-env NODE_OPTIONS=--experimental-vm-modules jest --passWithNoTests --runInBand src/agent-skills/structure-type/beam/",
+    "test:skill:frame": "npm run db:generate && npm run build && cross-env NODE_OPTIONS=--experimental-vm-modules jest --passWithNoTests --runInBand src/agent-skills/structure-type/frame/",
+    "test:skill:portal-frame": "npm run db:generate && npm run build && cross-env NODE_OPTIONS=--experimental-vm-modules jest --passWithNoTests --runInBand src/agent-skills/structure-type/portal-frame/",
     "db:generate": "prisma generate && node ./scripts/ensure-prisma-client-commonjs.mjs",
     "db:push": "npm run db:generate && node ./scripts/sync-sqlite-schema.mjs",
     "db:migrate": "npm run db:generate && node ./scripts/sync-sqlite-schema.mjs",
@@ -27,10 +31,10 @@
     "@prisma/client": "^6.19.2",
     "dotenv": "^17.3.1",
     "fastify": "^4.26.2",
-    "ioredis": "^5.3.2",
     "pg": "^8.20.0",
     "pino": "^8.19.0",
     "pino-pretty": "^11.0.0",
+    "yaml": "^2.8.1",
     "zod": "^3.22.4"
   },
   "devDependencies": {
@@ -45,6 +49,6 @@
     "typescript": "^5.4.3"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   }
 }

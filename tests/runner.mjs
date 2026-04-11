@@ -11,6 +11,7 @@ const { runBackendRegression } = require("./regression/backend-regression.js");
 const { runAnalysisRegression } = require("./regression/analysis-regression.js");
 const { runDockerComposeSmoke, runNativeInstallSmoke } = require("./smoke/install-smoke.cjs");
 const { runLlmIntegrationTests } = require("./llm-integration/runner.cjs");
+const { summarizeArtifacts, printSummary } = require("./llm-integration/summarize.cjs");
 
 function parseCliOptions(args) {
   const positionals = [];
@@ -73,6 +74,12 @@ Commands:
   backend-regression    Full backend regression suite
   analysis-regression   Full analysis regression suite
   llm-integration       LLM integration tests (requires LLM_API_KEY)
+                        supports: node tests/runner.mjs llm-integration [category]
+                          [--family <family>]  (alias: --skill)
+                          [--variant <specific|generic|auto>]
+                          [--scenario <scenarioId>]
+                          [--output <artifact.json>]
+  llm-summary <path>   Summarize LLM test artifacts by family/variant
   smoke-native          CI-style native install smoke (npm ci + build)
   smoke-docker          Docker compose smoke test
 
@@ -139,6 +146,25 @@ async function main() {
     case "llm-integration":
       await runLlmIntegrationTests(rootDir, rawArgs);
       return;
+    case "llm-summary": {
+      const artifactPath = rawArgs[0];
+      if (!artifactPath) {
+        throw new Error("Usage: node tests/runner.mjs llm-summary <artifact.json>");
+      }
+      const fs = require("node:fs");
+      if (!fs.existsSync(artifactPath)) {
+        throw new Error(`Artifact file not found: ${artifactPath}`);
+      }
+      const parsed = JSON.parse(fs.readFileSync(artifactPath, "utf-8"));
+      if (!Array.isArray(parsed)) {
+        throw new Error(`Expected a JSON array in ${artifactPath}, got ${typeof parsed}`);
+      }
+      const records = parsed;
+      const summary = summarizeArtifacts(records);
+      printSummary(summary);
+      process.stdout.write("\n");
+      return;
+    }
     default:
       throw new Error(`Unknown command: ${cmd}`);
   }

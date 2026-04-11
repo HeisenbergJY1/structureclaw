@@ -2,17 +2,25 @@ import { describe, expect, test } from '@jest/globals';
 import fs from 'node:fs';
 import { AgentService } from '../dist/services/agent.js';
 import { prisma } from '../dist/utils/database.js';
-import { redis } from '../dist/utils/redis.js';
+import { cache } from '../dist/utils/cache.js';
 
 function createServiceWithDefaultSkills() {
   const svc = new AgentService();
-  const defaultSkillIds = svc.listSkills().map((skill) => skill.id);
+  let defaultSkillIdsPromise;
 
-  const applyDefaultSkills = (params) => {
+  const getDefaultSkillIds = async () => {
+    if (!defaultSkillIdsPromise) {
+      defaultSkillIdsPromise = svc.listSkills().then((skills) => skills.map((skill) => skill.id));
+    }
+    return defaultSkillIdsPromise;
+  };
+
+  const applyDefaultSkills = async (params) => {
     const context = params?.context || {};
     if (context.skillIds !== undefined) {
       return params;
     }
+    const defaultSkillIds = await getDefaultSkillIds();
     return {
       ...params,
       context: {
@@ -23,55 +31,61 @@ function createServiceWithDefaultSkills() {
   };
 
   const originalRun = svc.run.bind(svc);
-  svc.run = async (params) => originalRun(applyDefaultSkills(params));
+  svc.run = async (params) => originalRun(await applyDefaultSkills(params));
 
   const runWithStrategy = svc.runWithStrategy.bind(svc);
   svc.runChatOnly = async (params) => runWithStrategy(
-    applyDefaultSkills(params),
+    await applyDefaultSkills(params),
     { planningDirective: 'auto', allowToolCall: false },
   );
   svc.runForcedExecution = async (params) => runWithStrategy(
-    applyDefaultSkills(params),
+    await applyDefaultSkills(params),
     { planningDirective: 'force_tool', allowToolCall: true },
   );
 
   const originalRunStream = svc.runStream.bind(svc);
   svc.runStream = async function* (params) {
-    yield* originalRunStream(applyDefaultSkills(params));
+    yield* originalRunStream(await applyDefaultSkills(params));
   };
 
   const runStreamWithStrategy = svc.runStreamWithStrategy.bind(svc);
   svc.runChatOnlyStream = async function* (params) {
     yield* runStreamWithStrategy(
-      applyDefaultSkills(params),
+      await applyDefaultSkills(params),
       { planningDirective: 'auto', allowToolCall: false },
     );
   };
   svc.runForcedExecutionStream = async function* (params) {
     yield* runStreamWithStrategy(
-      applyDefaultSkills(params),
+      await applyDefaultSkills(params),
       { planningDirective: 'force_tool', allowToolCall: true },
     );
   };
 
   const originalTextToModelDraft = svc.textToModelDraft.bind(svc);
-  svc.textToModelDraft = async (message, existingState, locale, skillIds) => (
+  svc.textToModelDraft = async (message, existingState, locale, skillIds) => {
+    const resolvedSkillIds = skillIds === undefined ? await getDefaultSkillIds() : skillIds;
+    return (
     originalTextToModelDraft(
       message,
       existingState,
       locale,
-      skillIds === undefined ? defaultSkillIds : skillIds,
+      resolvedSkillIds,
     )
-  );
+    );
+  };
 
   const originalGetConversationSessionSnapshot = svc.getConversationSessionSnapshot.bind(svc);
-  svc.getConversationSessionSnapshot = async (conversationId, locale, skillIds) => (
+  svc.getConversationSessionSnapshot = async (conversationId, locale, skillIds) => {
+    const resolvedSkillIds = skillIds === undefined ? await getDefaultSkillIds() : skillIds;
+    return (
     originalGetConversationSessionSnapshot(
       conversationId,
       locale,
-      skillIds === undefined ? defaultSkillIds : skillIds,
+      resolvedSkillIds,
     )
-  );
+    );
+  };
 
   return svc;
 }
@@ -140,6 +154,12 @@ function stubExecutionClients(svc, handlers = {}) {
   };
 
   return calls;
+}
+
+function createPlannerHttpError(status, data, message = 'planner request failed') {
+  const error = new Error(message);
+  error.response = { status, data };
+  return error;
 }
 
 describe('AgentService orchestration', () => {
@@ -382,14 +402,29 @@ describe('AgentService orchestration', () => {
   test('should clear stored conversation sessions', async () => {
     const svc = createServiceWithDefaultSkills();
     const deletedKeys = [];
-    redis.del = async (...keys) => {
-      deletedKeys.push(...keys);
-      return keys.length;
-    };
+    const originalDel = cache.del;
 
-    await svc.clearConversationSession('conv-cleanup');
+    try {
+      cache.del = async (...keys) => {
+        deletedKeys.push(...keys);
+        return keys.length;
+      };
+
+      await svc.clearConversationSession('conv-cleanup');
+    } finally {
+      cache.del = originalDel;
+    }
 
     expect(deletedKeys).toEqual(['agent:interaction-session:conv-cleanup']);
+  });
+
+  test('should preserve cache.del behavior after the cleanup-session assertion', async () => {
+    const key = `agent-service-cache-${Date.now()}`;
+
+    await cache.setex(key, 60, 'value');
+    await cache.del(key);
+
+    expect(await cache.get(key)).toBeNull();
   });
 
   test('should pass engineId through validate analyze and code-check calls', async () => {
@@ -2235,7 +2270,92 @@ describe('AgentService orchestration', () => {
     expect(result.success).toBe(false);
     expect(result.orchestrationMode).toBe('llm-planned');
     expect(result.toolCalls).toEqual([]);
-    expect(result.response).toContain('LLM planner');
+    expect(result.response).toContain('LLM configuration error');
+  });
+
+  test('should surface localized 401 planner details in blocked runs', async () => {
+    const svc = createServiceWithDefaultSkills();
+    svc.llm = {
+      invoke: async () => {
+        throw createPlannerHttpError(401, { error: 'invalid_api_key' }, 'Unauthorized');
+      },
+    };
+
+    const result = await svc.run({
+      message: 'Help me size a steel frame for static analysis',
+      context: {
+        locale: 'en',
+      },
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.response).toContain('LLM configuration error');
+    expect(result.response).toContain('invalid or unauthorized API key');
+  });
+
+  test('should surface localized 403 region planner details in blocked runs', async () => {
+    const svc = createServiceWithDefaultSkills();
+    svc.llm = {
+      invoke: async () => {
+        throw createPlannerHttpError(403, { error: 'model_not_available' }, 'Model is not available in your region');
+      },
+    };
+
+    const result = await svc.run({
+      message: 'Help me size a steel frame for static analysis',
+      context: {
+        locale: 'en',
+      },
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.response).toContain('LLM configuration error');
+    expect(result.response).toContain('model unavailable in your region');
+  });
+
+  test('should surface localized 429 planner details in blocked runs', async () => {
+    const svc = createServiceWithDefaultSkills();
+    svc.llm = {
+      invoke: async () => {
+        throw createPlannerHttpError(429, { error: 'rate_limit_exceeded' }, 'Too many requests');
+      },
+    };
+
+    const result = await svc.run({
+      message: 'Help me size a steel frame for static analysis',
+      context: {
+        locale: 'en',
+      },
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.response).toContain('LLM configuration error');
+    expect(result.response).toContain('rate limited or quota exceeded');
+  });
+
+  test('should surface sanitized generic http planner details in blocked runs', async () => {
+    const svc = createServiceWithDefaultSkills();
+    svc.llm = {
+      invoke: async () => {
+        throw createPlannerHttpError(
+          500,
+          'Internal upstream failure\nwith extra whitespace and provider payload details',
+          'Internal Server Error',
+        );
+      },
+    };
+
+    const result = await svc.run({
+      message: 'Help me size a steel frame for static analysis',
+      context: {
+        locale: 'en',
+      },
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.response).toContain('LLM configuration error');
+    expect(result.response).toContain('LLM 500 / Internal upstream failure with extra whitespace');
+    expect(result.response).not.toContain('\n');
   });
 
   test('should block unsupported structural types from silently falling back to beam extraction', async () => {

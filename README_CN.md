@@ -96,7 +96,7 @@ node .\sclaw stop
 
 ### Windows / Docker 新手说明
 
-Windows 现在可以直接使用 Docker 启动完整栈，适合不想先手动安装本地 Node.js、Python 和数据库环境的新手。
+Windows 现在可以直接使用 Docker 启动完整栈，适合不想先手动安装本地 Node.js 和 Python 的新手。
 
 推荐步骤：
 
@@ -111,7 +111,7 @@ node .\sclaw docker-install
 如果是 CI 或脚本化环境，使用非交互方式：
 
 ```powershell
-node .\sclaw docker-install --non-interactive --llm-provider openai --llm-base-url https://api.openai.com/v1 --llm-api-key <your-key> --llm-model gpt-4.1
+node .\sclaw docker-install --non-interactive --llm-base-url https://api.openai.com/v1 --llm-api-key <your-key> --llm-model gpt-4.1
 ```
 
 启动完成后，常用入口如下：
@@ -140,8 +140,8 @@ docker compose down
 关键变量包括：
 
 - `PORT`、`FRONTEND_PORT`
-- `DATABASE_URL`、`POSTGRES_SOURCE_DATABASE_URL`、`REDIS_URL`
-- `LLM_PROVIDER`、`LLM_API_KEY`、`LLM_MODEL`、`LLM_BASE_URL`
+- `DATABASE_URL`、`POSTGRES_SOURCE_DATABASE_URL`
+- `LLM_API_KEY`、`LLM_MODEL`、`LLM_BASE_URL`（OpenAI-compatible 接口）
 - `ANALYSIS_PYTHON_BIN`、`ANALYSIS_PYTHON_TIMEOUT_MS`、`ANALYSIS_ENGINE_MANIFEST_PATH`
 
 ## 主要 API 入口
