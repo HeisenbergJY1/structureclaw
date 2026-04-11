@@ -1,0 +1,45 @@
+id: yjk-static
+domain: analysis
+source: builtin
+name:
+  zh: YJK 静力分析
+  en: YJK Static Analysis
+description:
+  zh: 使用 YJK (盈建科) 引擎自动建模并执行静力分析，提取节点位移、构件内力、楼层刚度等结构化结果（需安装 YJK 8.0 并配置 YJKS_ROOT 或 YJK_PATH）。
+  en: Automated modeling and static analysis using the YJK engine. Extracts node displacements, member forces, and floor statistics as structured results (requires YJK 8.0 and YJKS_ROOT or YJK_PATH).
+triggers:
+  - YJK 静力分析
+  - YJK 计算
+  - 盈建科
+  - yjk static
+  - yjk analysis
+stages:
+  - analysis
+structureType: unknown
+structuralTypeKeys: []
+capabilities:
+  - analysis-policy
+  - analysis-execution
+grants:
+  - run_analysis
+providesTools: []
+requires: []
+conflicts: []
+autoLoadByDefault: false
+priority: 125
+compatibility:
+  minRuntimeVersion: 0.1.0
+  skillApiVersion: v1
+software: yjk
+analysisType: static
+engineId: builtin-yjk
+adapterKey: builtin-yjk
+runtimeRelativePath: runtime.py
+supportedAnalysisTypes:
+  - static
+supportedModelFamilies:
+  - frame
+  - generic
+materialFamilies: []
+aliases: []
+toolHints: {}
