@@ -108,16 +108,40 @@ def _make_section_shape(shape: dict) -> tuple[Any, APIPyInterface.SectionShape]:
     return sec_kind, sh
 
 
+def _infer_section_roles(data: dict) -> dict[str, str]:
+    """Build {section_id: "col"|"beam"} by scanning element types.
+
+    Falls back to sec.get("purpose") when no element references the section.
+    A section used by both columns and beams is registered as "col" so that
+    PKPM's AddColumn() receives a ColumnSection index.
+    """
+    roles: dict[str, str] = {}
+    for elem in data.get("elements", []):
+        sec_id = elem.get("section", "")
+        if not sec_id:
+            continue
+        etype = elem.get("type", "beam")
+        if etype == "column":
+            roles[sec_id] = "col"   # column wins over beam
+        elif sec_id not in roles:
+            roles[sec_id] = "beam"
+    return roles
+
+
 def _register_section(
     model: APIPyInterface.Model,
     sec: dict,
+    inferred_role: str,
 ) -> tuple[str, int]:
     """
     Register one V2 section entry.
     Returns (role, pm_section_idx) where role is "col" or "beam".
+
+    The role is determined by the caller via _infer_section_roles() so that
+    sections used by column elements are always registered as ColumnSection,
+    regardless of whether sec["purpose"] is set.
     """
-    purpose = sec.get("purpose", "beam")
-    role = "col" if purpose == "column" else "beam"
+    role = inferred_role
 
     std_name: str | None = sec.get("standard_steel_name")
     shape_dict: dict | None = sec.get("shape")
@@ -149,12 +173,18 @@ def _register_section(
 def _build_section_registry(
     model: APIPyInterface.Model,
     sections: list[dict],
+    data: dict,
 ) -> dict[str, tuple[str, int]]:
     """Register all sections. Returns {sec_id: (role, pm_idx)}."""
+    inferred = _infer_section_roles(data)
     registry: dict[str, tuple[str, int]] = {}
     for sec in sections:
-        role, pm_idx = _register_section(model, sec)
-        registry[sec["id"]] = (role, pm_idx)
+        # Use element-inferred role; fall back to sec["purpose"] if not referenced
+        purpose = sec.get("purpose", "beam")
+        fallback_role = "col" if purpose == "column" else "beam"
+        role = inferred.get(sec["id"], fallback_role)
+        r, pm_idx = _register_section(model, sec, role)
+        registry[sec["id"]] = (r, pm_idx)
     return registry
 
 
@@ -267,7 +297,7 @@ def convert_v2_to_jws(
         mat_id_to_grade[mat["id"]] = grade
 
     # ---- Sections ----
-    sec_registry = _build_section_registry(model, data.get("sections", []))
+    sec_registry = _build_section_registry(model, data.get("sections", []), data)
 
     # Collect first col/beam section index for fallback when element has no section
     fallback_col_idx = next(
