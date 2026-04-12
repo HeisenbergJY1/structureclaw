@@ -30,6 +30,18 @@ ENGINE_DEFAULTS = {
         "routingHints": ["high-fidelity", "default"],
         "constraints": {"requiresOpenSees": True},
     },
+    "builtin-pkpm": {
+        "name": "PKPM Builtin",
+        "priority": 90,
+        "routingHints": ["commercial", "design-code"],
+        "constraints": {"requiresPKPM": True},
+    },
+    "builtin-yjk": {
+        "name": "YJK Builtin",
+        "priority": 85,
+        "routingHints": ["commercial", "design-code"],
+        "constraints": {"requiresYJK": True},
+    },
     "builtin-simplified": {
         "name": "Simplified Builtin",
         "priority": 10,
@@ -412,8 +424,13 @@ class AnalysisEngineRegistry:
     def _get_engine_unavailable_reason(self, manifest: Dict[str, Any]) -> Optional[str]:
         if not manifest.get("enabled", True):
             return "Engine is disabled"
-        if manifest["kind"] == "python" and manifest.get("constraints", {}).get("requiresOpenSees"):
+        constraints = manifest.get("constraints", {})
+        if manifest["kind"] == "python" and constraints.get("requiresOpenSees"):
             return self._opensees_unavailable_reason()
+        if manifest["kind"] == "python" and constraints.get("requiresYJK"):
+            return self._yjk_unavailable_reason()
+        if manifest["kind"] == "python" and constraints.get("requiresPKPM"):
+            return self._pkpm_unavailable_reason()
         if manifest["kind"] == "http":
             base_url = manifest.get("baseUrl")
             if not isinstance(base_url, str) or not base_url.strip():
@@ -489,6 +506,48 @@ class AnalysisEngineRegistry:
         logger.warning("OpenSeesPy runtime is unavailable: %s", reason)
         self._opensees_runtime_reason = str(reason)
         return self._opensees_runtime_reason
+
+    def _yjk_unavailable_reason(self) -> Optional[str]:
+        """Check whether YJK 8.0 is installed and reachable."""
+        root = (os.getenv("YJK_PATH", "").strip() or os.getenv("YJKS_ROOT", "").strip())
+        if not root:
+            return "YJK install root not set (set YJKS_ROOT or YJK_PATH)"
+        if not Path(root).is_dir():
+            return f"YJK install directory does not exist: {root}"
+
+        # Check for yjks.exe
+        yjks_exe_env = os.getenv("YJKS_EXE", "").strip()
+        if yjks_exe_env:
+            if not Path(yjks_exe_env).is_file():
+                return f"YJKS_EXE points to missing file: {yjks_exe_env}"
+        else:
+            found = any(
+                (Path(root) / name).is_file()
+                for name in ("yjks.exe", "YJKS.exe")
+            )
+            if not found:
+                return f"yjks.exe not found in {root}"
+
+        # Check for YJK's bundled Python 3.10
+        python_bin = os.getenv("YJK_PYTHON_BIN", "").strip()
+        if python_bin:
+            if not Path(python_bin).is_file():
+                return f"YJK_PYTHON_BIN points to missing file: {python_bin}"
+        else:
+            python_exe = Path(root) / "Python310" / "python.exe"
+            if not python_exe.is_file():
+                return f"YJK Python 3.10 not found at {python_exe}"
+
+        return None
+
+    def _pkpm_unavailable_reason(self) -> Optional[str]:
+        """Check whether PKPM is installed and reachable."""
+        root = os.getenv("PKPM_PATH", "").strip()
+        if not root:
+            return "PKPM install root not set (set PKPM_PATH)"
+        if not Path(root).is_dir():
+            return f"PKPM install directory does not exist: {root}"
+        return None
 
     def _builtin_manifests(self) -> List[Dict[str, Any]]:
         manifests: List[Dict[str, Any]] = []
