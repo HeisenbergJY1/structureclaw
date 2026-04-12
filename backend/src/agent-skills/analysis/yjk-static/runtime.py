@@ -294,6 +294,9 @@ def _ensure_v2_model(model_dict: dict) -> dict:
                     sec["height"] = side
 
     # --- Enrich elements with column type based on vertical (Z) orientation ---
+    # NOTE: This block runs AFTER the V1->V2 coordinate remap above, so
+    # n["z"] is already the vertical axis for both V1 and native V2 payloads.
+    # dz = vertical delta → column; dx/dy dominant → beam.
     node_map = {n["id"]: n for n in nodes}
     for elem in v2.get("elements", []):
         if elem.get("type") in ("beam", "column"):
