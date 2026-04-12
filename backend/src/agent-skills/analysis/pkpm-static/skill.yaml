@@ -14,6 +14,7 @@ triggers:
   - pkpm static
   - pkpm analysis
 stages:
+  - intent
   - analysis
 structureType: unknown
 structuralTypeKeys: []

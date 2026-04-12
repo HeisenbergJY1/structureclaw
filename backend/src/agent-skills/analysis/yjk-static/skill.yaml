@@ -14,8 +14,8 @@ triggers:
   - yjk static
   - yjk analysis
 stages:
+  - intent
   - analysis
-structureType: unknown
 structuralTypeKeys: []
 capabilities:
   - analysis-policy
