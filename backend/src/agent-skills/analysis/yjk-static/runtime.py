@@ -136,8 +136,24 @@ def _ensure_v2_model(model_dict: dict) -> dict:
     lack these.  This function synthesizes the missing V2 fields from V1
     data so the converter can proceed.
 
-    Coordinate system: V1 frame handler uses (x=X, y=vertical, z=Y).
-    V2 / YJK expects (x=X, y=Y, z=vertical).  We detect and remap.
+    Coordinate system
+    -----------------
+    V1 frame handler (frame/model.ts) uses:
+        x = X-axis (horizontal span)
+        y = vertical (storey height)   <-- vertical axis
+        z = Y-axis (plan depth, 0 for 2-D models)
+
+    V2 / YJK expects:
+        x = X-axis
+        y = Y-axis (plan depth)
+        z = vertical                   <-- vertical axis
+
+    We detect V1 models by checking whether any node has a non-zero y
+    value while z is uniformly 0 (2-D) or z carries plan-depth values
+    (3-D).  When detected, we remap:
+        V2.x = V1.x
+        V2.y = V1.z   (plan Y-axis)
+        V2.z = V1.y   (vertical)
     """
     if model_dict.get("schema_version", "").startswith("2"):
         return model_dict
@@ -148,7 +164,20 @@ def _ensure_v2_model(model_dict: dict) -> dict:
 
     nodes = v2.get("nodes", [])
 
-    # --- Synthesize stories from node Z coordinates (vertical) ---
+    # --- Remap V1 coordinates (x,y=vertical,z=planY) -> V2 (x,y=planY,z=vertical) ---
+    # Detect V1 layout: at least one node has y > 0 (storey elevation) and
+    # the vertical axis is y, not z.
+    needs_remap = nodes and any(float(n.get("y", 0)) > 0 for n in nodes)
+    if needs_remap:
+        for n in nodes:
+            v1_x = float(n.get("x", 0))
+            v1_y = float(n.get("y", 0))  # vertical in V1
+            v1_z = float(n.get("z", 0))  # plan-Y in V1
+            n["x"] = v1_x
+            n["y"] = v1_z   # plan-Y becomes V2.y
+            n["z"] = v1_y   # vertical becomes V2.z
+
+    # --- Synthesize stories from node Z coordinates (vertical after remap) ---
     if not v2.get("stories") and nodes:
         z_vals = sorted({round(float(n.get("z", 0)), 3) for n in nodes})
         elevations = [z for z in z_vals if z > 0]
