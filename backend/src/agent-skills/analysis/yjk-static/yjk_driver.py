@@ -9,8 +9,8 @@ Usage (called by runtime.py via subprocess):
     <YJK_PYTHON> yjk_driver.py <model.json> <work_dir>
 
 Reads the V2 model JSON, converts to .ydb, launches YJK GUI, runs a
-full static analysis, extracts structured results via yjks_pyload,
-and outputs the combined result JSON to stdout.
+full static analysis, collects available .OUT text as fallback result
+content, and outputs the final result JSON to stdout.
 
 The sequence below strictly follows the proven three_story_steel_frame.py
 pattern from the YJK SDK.

@@ -64,7 +64,7 @@ function resolveSectionProps(
   role: 'column' | 'beam',
   storyCount: number,
   matG: number,
-): SectionProps & { substituted?: string } {
+): SectionProps {
   const defaultSection = role === 'column'
     ? getDefaultColumnSection(storyCount)
     : getDefaultBeamSection(storyCount);
