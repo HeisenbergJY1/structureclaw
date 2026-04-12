@@ -49,14 +49,26 @@ def _resolve_steel_grade(grade_str: str) -> Any:
 # ---------------------------------------------------------------------------
 
 _KIND_MAP: dict[str, Any] = {
-    "H":         "IDSec_I",
-    "I":         "IDSec_I",
-    "Box":       "IDSec_Box",
-    "Tube":      "IDSec_Tube",
-    "Rectangle": "IDSec_Rectangle",
-    "Circle":    "IDSec_Circle",
-    "T":         "IDSec_T",
-    "L":         "IDSec_L",
+    # PascalCase (legacy / internal)
+    "H":           "IDSec_I",
+    "I":           "IDSec_I",
+    "Box":         "IDSec_Box",
+    "Tube":        "IDSec_Tube",
+    "Rectangle":   "IDSec_Rectangle",
+    "Circle":      "IDSec_Circle",
+    "T":           "IDSec_T",
+    "L":           "IDSec_L",
+    # V2 schema lowercase aliases
+    "h":           "IDSec_I",
+    "i":           "IDSec_I",
+    "box":         "IDSec_Box",
+    "tube":        "IDSec_Tube",
+    "pipe":        "IDSec_Tube",   # V2 uses "pipe" for circular hollow
+    "hollow-circular": "IDSec_Tube",
+    "rectangular": "IDSec_Rectangle",
+    "circular":    "IDSec_Circle",
+    "t":           "IDSec_T",
+    "l":           "IDSec_L",
 }
 
 
@@ -69,12 +81,12 @@ def _make_section_shape(shape: dict) -> tuple[Any, APIPyInterface.SectionShape]:
     sec_kind_attr = _KIND_MAP.get(kind, "IDSec_I")
     sec_kind = getattr(sk, sec_kind_attr, sk.IDSec_Rectangle)
 
-    H  = shape.get("H")
-    B  = shape.get("B")
-    T  = shape.get("T")  # wall/flange thickness (Box/Tube) or flange (T-section)
+    H  = shape.get("H") or shape.get("h")
+    B  = shape.get("B") or shape.get("b")
+    T  = shape.get("T") or shape.get("t")  # wall/flange thickness (Box/Tube) or flange (T-section)
     tw = shape.get("tw")
     tf = shape.get("tf")
-    D  = shape.get("D")
+    D  = shape.get("D") or shape.get("d")  # V2 uses lowercase "d" for diameter
 
     if H  is not None: sh.Set_H(int(H))
     if B  is not None: sh.Set_B(int(B))

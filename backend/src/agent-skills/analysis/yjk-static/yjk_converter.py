@@ -65,6 +65,8 @@ _TYPE_TO_KIND: dict[str, int] = {
     "cross": 6,         # 十字形
     "box": 7,           # 箱型          ShapeVal "B,H,U,T,D,F" (等厚: B,H,t,t,t,t)
     "tube": 8,          # 圆管          ShapeVal "D,d"
+    "pipe": 8,          # V2 alias for circular hollow section
+    "hollow-circular": 8,  # V2 alias for circular hollow section
     "double-channel": 9,  # 双槽形
     "cross-I": 10,      # 十字工
     "trapezoid": 11,    # 梯形
@@ -195,8 +197,9 @@ def _build_shape_val(sec: dict, kind: int) -> tuple[int, str, str]:
     extra = sec.get("extra", {})
 
     std_name = (
-        props.get("standard_steel_name")
-        or extra.get("standard_steel_name")
+        sec.get("standard_steel_name")       # V2 canonical top-level field
+        or props.get("standard_steel_name")  # legacy: written into properties
+        or extra.get("standard_steel_name")  # extra dict fallback
         or ""
     )
 

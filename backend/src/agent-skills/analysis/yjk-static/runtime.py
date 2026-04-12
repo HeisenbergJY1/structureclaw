@@ -238,6 +238,7 @@ def _ensure_v2_model(model_dict: dict) -> dict:
         sec_name = (sec.get("name") or "").strip()
 
         if sec_name and _STD_STEEL_RE.match(sec_name):
+            normalized_sec_name = sec_name.upper().replace("×", "X").replace("x", "X")
             m = _H_DIMS_RE.match(sec_name)
             if m:
                 H_val = int(m.group(1))
@@ -260,14 +261,16 @@ def _ensure_v2_model(model_dict: dict) -> dict:
                     props.pop("standard_steel_name", None)
                     sec["properties"] = props
                 else:
-                    props.setdefault("standard_steel_name",
-                                     sec_name.upper().replace("×", "X").replace("x", "X"))
+                    # Write to both top-level (V2 canonical) and properties (legacy compat)
+                    sec.setdefault("standard_steel_name", normalized_sec_name)
+                    props.setdefault("standard_steel_name", normalized_sec_name)
                     sec["properties"] = props
                     if not sec.get("type") or sec.get("type") == "beam":
                         sec["type"] = "H"
             else:
-                props.setdefault("standard_steel_name",
-                                 sec_name.upper().replace("×", "X").replace("x", "X"))
+                # Write to both top-level (V2 canonical) and properties (legacy compat)
+                sec.setdefault("standard_steel_name", normalized_sec_name)
+                props.setdefault("standard_steel_name", normalized_sec_name)
                 sec["properties"] = props
                 if not sec.get("type") or sec.get("type") == "beam":
                     sec["type"] = "H"
