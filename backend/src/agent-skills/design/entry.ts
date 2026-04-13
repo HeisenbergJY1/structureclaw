@@ -12,6 +12,10 @@ export function inferAnalysisType(policy: AgentPolicyService, message: string): 
   return policy.inferAnalysisType(message);
 }
 
+export function inferEngineId(policy: AgentPolicyService, message: string): string | undefined {
+  return policy.inferEngineId(message);
+}
+
 export function inferCodeCheckIntent(policy: AgentPolicyService, message: string): boolean {
   return policy.inferCodeCheckIntent(message);
 }

@@ -18,6 +18,7 @@ import {
 } from '../agent-runtime/index.js';
 import {
   inferAnalysisType,
+  inferEngineId,
   inferReportIntent,
   normalizePolicyAnalysisType,
   normalizePolicyReportFormat,
@@ -156,6 +157,7 @@ export interface SkillDrivenToolDecision {
 
 export interface ResolvedExecutionConfig {
   analysisType: 'static' | 'dynamic' | 'seismic' | 'nonlinear';
+  engineId?: string;
   designCode?: string;
   autoCodeCheck: boolean;
   includeReport: boolean;
@@ -1882,6 +1884,7 @@ export class AgentService {
     const codeFromSkills = this.skillRuntime.resolveCodeCheckDesignCodeFromSkillIds(skillIds);
     return {
       analysisType: workingSession.resolved?.analysisType || params.context?.analysisType || inferAnalysisType(this.policy, params.message),
+      engineId: params.context?.engineId || inferEngineId(this.policy, params.message),
       designCode: workingSession.resolved?.designCode || params.context?.designCode || codeFromSkills,
       autoCodeCheck: workingSession.resolved?.autoCodeCheck
         ?? params.context?.autoCodeCheck
@@ -2375,7 +2378,7 @@ export class AgentService {
       traceId,
       locale,
       analysisType: executionConfig.analysisType,
-      engineId: params.context?.engineId,
+      engineId: executionConfig.engineId ?? params.context?.engineId,
       model: normalizedModel,
       parameters: this.buildAnalysisParameters(analysisParameters, normalizedModel),
       plan,
@@ -2478,7 +2481,7 @@ export class AgentService {
       analysis: analyzed,
       analysisParameters,
       codeCheckElements: params.context?.codeCheckElements,
-      engineId: params.context?.engineId,
+      engineId: executionConfig.engineId ?? params.context?.engineId,
       runCodeCheck: async () => this.skillRuntime.executeCodeCheckSkill({
         codeCheckClient: this.codeCheckClient,
         traceId,
@@ -2487,7 +2490,7 @@ export class AgentService {
         analysis: analyzed,
         analysisParameters,
         codeCheckElements: params.context?.codeCheckElements,
-        engineId: params.context?.engineId,
+        engineId: executionConfig.engineId ?? params.context?.engineId,
         codeCheckSkillId: this.skillRuntime.resolveCodeCheckSkillId(designCode),
       }),
       buildBlockedResult: async (response) => this.finalizeBlockedRunResult({

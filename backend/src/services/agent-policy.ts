@@ -39,6 +39,20 @@ export class AgentPolicyService {
     return 'static';
   }
 
+  inferEngineId(message: string): string | undefined {
+    const text = message.toLowerCase();
+    if (text.includes('yjk') || text.includes('盈建科') || text.includes('启动yjk') || text.includes('yjks')) {
+      return 'builtin-yjk';
+    }
+    if (text.includes('pkpm') || text.includes('启动pkpm')) {
+      return 'builtin-pkpm';
+    }
+    if (text.includes('opensees') || text.includes('开源有限元')) {
+      return 'builtin-opensees';
+    }
+    return undefined;
+  }
+
   inferCodeCheckIntent(message: string): boolean {
     const text = message.toLowerCase();
     return text.includes('校核')
@@ -64,6 +78,10 @@ export class AgentPolicyService {
       '开始求解',
       '运行求解',
       '分析这个模型',
+      '启动yjk',
+      '启动pkpm',
+      '启动opensees',
+      '启动盈建科',
       'run analysis',
       'start analysis',
       'perform analysis',
