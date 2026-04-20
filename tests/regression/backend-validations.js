@@ -165,6 +165,22 @@ async function validateAgentOrchestration(context) {
     assert(protocol.runRequestSchema?.type === "object", "runRequestSchema should be json schema object");
     assert(protocol.runResultSchema?.type === "object", "runResultSchema should be json schema object");
     assert(Array.isArray(protocol.streamEventSchema?.oneOf), "streamEventSchema should include oneOf");
+    assert(
+      protocol.streamEventSchema.oneOf.some((entry) => entry?.properties?.type?.const === "presentation_init"),
+      "stream schema should expose presentation_init",
+    );
+    assert(
+      protocol.streamEventSchema.oneOf.some((entry) => entry?.properties?.type?.const === "phase_upsert"),
+      "stream schema should expose phase_upsert",
+    );
+    assert(
+      protocol.streamEventSchema.oneOf.some((entry) => entry?.properties?.type?.const === "artifact_upsert"),
+      "stream schema should expose artifact_upsert",
+    );
+    assert(
+      protocol.streamEventSchema.oneOf.some((entry) => entry?.properties?.type?.const === "artifact_payload_sync"),
+      "stream schema should expose artifact_payload_sync",
+    );
     assert(protocol.tools.some((tool) => tool.name === "run_analysis"), "run_analysis tool spec should exist");
     assert(protocol.tools.every((tool) => tool.outputSchema && typeof tool.outputSchema === "object"), "tool outputSchema should exist");
     assert(protocol.tools.every((tool) => Array.isArray(tool.errorCodes)), "tool errorCodes should be array");
@@ -2616,11 +2632,11 @@ async function validateAgentCapabilityMatrix(context) {
   assert(domainSummaryById["load-boundary"]?.runtimeStatus === "discoverable", "load-boundary domain should remain discoverable while builtin skills exist");
   assert(domainSummaryById["visualization"]?.runtimeStatus === "discoverable", "visualization domain should remain discoverable while builtin skills exist");
   assert(domainSummaryById["general"]?.runtimeStatus === "discoverable", "general domain should be discoverable while builtin utility skills exist");
-  assert(domainSummaryById["design"]?.runtimeStatus === "reserved", "design domain should be reserved when it has no runtime skill presence");
+  assert(domainSummaryById["design"]?.runtimeStatus === "partial", "design domain should be partial when design-builtin skill is present");
   assert(domainSummaryById["data-input"]?.runtimeStatus === "reserved", "data-input domain should be reserved when it has no runtime skill presence");
   assert(domainSummaryById["drawing"]?.runtimeStatus === "discoverable", "drawing domain should be discoverable while builtin skills exist");
   assert(domainSummaryById["material"]?.runtimeStatus === "reserved", "material domain should be reserved when it has no runtime skill presence");
-  assert(domainSummaryById["result-postprocess"]?.runtimeStatus === "reserved", "result-postprocess domain should be reserved when it has no runtime skill presence");
+  assert(domainSummaryById["result-postprocess"]?.runtimeStatus === "active", "result-postprocess domain should be active when postprocess-builtin skill is present");
   assert(domainSummaryById["load-boundary"]?.skillIds.includes("dead-load"), "load-boundary summary should include discoverable builtin skills");
   assert(domainSummaryById["section"]?.skillIds.includes("section-common"), "section summary should include discoverable builtin skills");
   assert(domainSummaryById["visualization"]?.skillIds.includes("visualization-frame-summary"), "visualization summary should include discoverable builtin skills");
@@ -2980,7 +2996,7 @@ async function validateAgentSkillhubRepositoryDown(context) {
   const result = await svc.runForcedExecution({
     message: "按3m悬臂梁端部10kN点荷载做静力分析",
     context: {
-      skillIds: ["beam"],
+      skillIds: ["beam", "opensees-static", "validation-structure-model"],
       model: {
         schema_version: "1.0.0",
         unit_system: "SI",
@@ -3013,15 +3029,135 @@ async function validateChatStreamContract(context) {
   await runBackendBuildOnce(context);
   const Fastify = backendRequire(context.rootDir)("fastify");
   const AgentService = await importBackendAgentService(context.rootDir);
+  const { prisma } = await import(pathToFileURL(path.join(context.rootDir, "backend", "dist", "utils", "database.js")).href);
+  const protocol = AgentService.getProtocol();
+
+  assert(
+    Array.isArray(protocol.streamEventSchema?.oneOf)
+      && protocol.streamEventSchema.oneOf.some((entry) => entry?.properties?.type?.const === "presentation_init"),
+    "stream schema should expose presentation_init",
+  );
+  assert(
+    Array.isArray(protocol.streamEventSchema?.oneOf)
+      && protocol.streamEventSchema.oneOf.some((entry) => entry?.properties?.type?.const === "phase_upsert"),
+    "stream schema should expose phase_upsert",
+  );
+  assert(
+    Array.isArray(protocol.streamEventSchema?.oneOf)
+      && protocol.streamEventSchema.oneOf.some((entry) => entry?.properties?.type?.const === "artifact_upsert"),
+    "stream schema should expose artifact_upsert",
+  );
+  assert(
+    Array.isArray(protocol.streamEventSchema?.oneOf)
+      && protocol.streamEventSchema.oneOf.some((entry) => entry?.properties?.type?.const === "artifact_payload_sync"),
+    "stream schema should expose artifact_payload_sync",
+  );
 
   let capturedTraceId;
+  let persistedAssistantMetadata;
   const originalRunStream = AgentService.prototype.runStream;
   const originalRunForcedExecutionStream = AgentService.prototype.runForcedExecutionStream;
+  const originalConversationFindFirst = prisma.conversation.findFirst;
+  const originalConversationUpdate = prisma.conversation.update;
+  const originalMessageFindMany = prisma.message.findMany;
+  const originalMessageCreateMany = prisma.message.createMany;
   const mockRunStream = async function* mockRunStream(params) {
     const request = params;
     capturedTraceId = request.traceId;
     const traceId = "stream-trace-001";
     yield { type: "start", content: { traceId, conversationId: "conv-stream-001", startedAt: "2026-03-09T00:00:00.000Z" } };
+    yield {
+      type: "presentation_init",
+      presentation: {
+        version: 3,
+        mode: "execution",
+        status: "streaming",
+        summaryText: "",
+        phases: [],
+        artifacts: [],
+        traceId,
+        startedAt: "2026-03-09T00:00:00.000Z",
+      },
+    };
+    yield {
+      type: "phase_upsert",
+      phase: {
+        phaseId: "phase:modeling",
+        phase: "modeling",
+        title: "建模阶段",
+        status: "running",
+        steps: [],
+      },
+    };
+    yield {
+      type: "step_upsert",
+      step: {
+        id: "step:draft_model:2026-03-09T00:00:00.002Z",
+        phase: "modeling",
+        status: "done",
+        tool: "draft_model",
+        title: "已选择建模技能",
+        reason: "routing",
+        startedAt: "2026-03-09T00:00:00.002Z",
+      },
+      phaseId: "phase:modeling",
+    };
+    yield {
+      type: "step_upsert",
+      phaseId: "phase:modeling",
+      step: {
+        id: "step:draft_model:2026-03-09T00:00:00.003Z",
+        phase: "modeling",
+        tool: "draft_model",
+        status: "running",
+        title: "开始生成结构模型",
+        reason: "draft model",
+        startedAt: "2026-03-09T00:00:00.003Z",
+      },
+    };
+    yield {
+      type: "step_upsert",
+      phaseId: "phase:understanding",
+      step: {
+        id: "step:clarify:2026-03-09T00:00:00.004Z",
+        phase: "understanding",
+        status: "done",
+        title: "Need more modeling details",
+        errorMessage: "Please provide the span and support conditions.",
+        startedAt: "2026-03-09T00:00:00.004Z",
+      },
+    };
+    yield {
+      type: "artifact_upsert",
+      artifact: {
+        artifact: "model",
+        status: "available",
+        title: "结构模型",
+        previewable: true,
+        snapshotKey: "modelSnapshot",
+      },
+    };
+    yield {
+      type: "artifact_payload_sync",
+      artifact: "model",
+      model: { schema_version: "1.0.0" },
+    };
+    yield {
+      type: "step_upsert",
+      phaseId: "phase:modeling",
+      step: {
+        id: "step:draft_model:2026-03-09T00:00:00.015Z",
+        phase: "modeling",
+        tool: "draft_model",
+        status: "done",
+        title: "结构模型已生成",
+        output: { model: { schema_version: "1.0.0" } },
+        startedAt: "2026-03-09T00:00:00.015Z",
+        completedAt: "2026-03-09T00:00:00.030Z",
+        durationMs: 15,
+      },
+    };
+    yield { type: "summary_replace", summaryText: "ok" };
     yield {
       type: "result",
       content: {
@@ -3034,7 +3170,25 @@ async function validateChatStreamContract(context) {
         orchestrationMode: "llm-planned",
         needsModelInput: false,
         plan: ["validate_model", "run_analysis", "generate_report"],
-        toolCalls: [],
+        routing: {
+          selectedSkillIds: ["frame"],
+          activatedSkillIds: ["frame"],
+          structuralSkillId: "frame",
+          analysisSkillId: "analysis-static",
+        },
+        toolCalls: [
+          {
+            tool: "draft_model",
+            status: "success",
+            startedAt: "2026-03-09T00:00:00.015Z",
+            completedAt: "2026-03-09T00:00:00.030Z",
+            durationMs: 15,
+            output: {
+              model: { schema_version: "1.0.0" },
+            },
+          },
+        ],
+        model: { schema_version: "1.0.0" },
         response: "ok",
       },
     };
@@ -3042,6 +3196,13 @@ async function validateChatStreamContract(context) {
   };
   AgentService.prototype.runStream = mockRunStream;
   AgentService.prototype.runForcedExecutionStream = mockRunStream;
+  prisma.conversation.findFirst = async () => ({ id: "conv-stream-001" });
+  prisma.conversation.update = async () => ({ id: "conv-stream-001" });
+  prisma.message.findMany = async () => [];
+  prisma.message.createMany = async ({ data }) => {
+    persistedAssistantMetadata = data.find((entry) => entry.role === "assistant")?.metadata;
+    return { count: Array.isArray(data) ? data.length : 0 };
+  };
 
   const parseSseEvents = (raw) =>
     raw
@@ -3080,9 +3241,24 @@ async function validateChatStreamContract(context) {
       .filter((item) => item !== "[DONE]")
       .map((item) => JSON.parse(item));
     assert(chunks[0].type === "start", "first chunk should be start");
+    assert(chunks.some((chunk) => chunk.type === "presentation_init"), "stream should contain presentation_init chunk");
+    assert(chunks.some((chunk) => chunk.type === "phase_upsert"), "stream should contain phase_upsert chunk");
+    assert(chunks.some((chunk) => chunk.type === "artifact_upsert"), "stream should contain artifact_upsert chunk");
+    assert(chunks.some((chunk) => chunk.type === "artifact_payload_sync"), "stream should contain artifact_payload_sync chunk");
+    assert(chunks.some((chunk) => chunk.type === "step_upsert" && chunk.phaseId === "phase:modeling"), "stream should contain phase-scoped step chunk");
     assert(chunks.some((chunk) => chunk.type === "result"), "stream should contain result chunk");
     assert(chunks[chunks.length - 1].type === "done", "last chunk before [DONE] should be done");
     assert(capturedTraceId === "trace-stream-request-1", "chat/stream should pass traceId to agent stream");
+    assert(persistedAssistantMetadata?.presentation?.version === 3, "chat/stream should persist assistant presentation metadata");
+    assert(
+      persistedAssistantMetadata?.presentation?.summaryText === "ok",
+      "chat/stream should persist the latest summaryText inside assistant presentation metadata",
+    );
+    assert(
+      Array.isArray(persistedAssistantMetadata?.presentation?.phases)
+        && persistedAssistantMetadata.presentation.phases.some((phase) => phase.phase === "modeling" && phase.steps.some((step) => step.tool === "draft_model")),
+      "chat/stream should persist modeling steps inside assistant presentation metadata",
+    );
 
     const startTrace = chunks.find((chunk) => chunk.type === "start")?.content?.traceId;
     const resultTrace = chunks.find((chunk) => chunk.type === "result")?.content?.traceId;
@@ -3105,6 +3281,10 @@ async function validateChatStreamContract(context) {
   } finally {
     AgentService.prototype.runStream = originalRunStream;
     AgentService.prototype.runForcedExecutionStream = originalRunForcedExecutionStream;
+    prisma.conversation.findFirst = originalConversationFindFirst;
+    prisma.conversation.update = originalConversationUpdate;
+    prisma.message.findMany = originalMessageFindMany;
+    prisma.message.createMany = originalMessageCreateMany;
     if (app) {
       await app.close();
     }
@@ -3312,6 +3492,7 @@ async function validateReportNarrativeContract(context) {
   const result = await svc.runWithStrategy({
     message: "请分析并按规范校核后出报告",
     context: {
+      skillIds: ["beam", "opensees-static", "validation-structure-model", "report-export-builtin", "code-check-gb50017", "postprocess-builtin"],
       model: {
         schema_version: "1.0.0",
         nodes: [

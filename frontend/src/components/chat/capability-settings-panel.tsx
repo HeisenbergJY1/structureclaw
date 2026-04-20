@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { API_BASE } from '@/lib/api-base'
 import { loadCapabilityPreferences, saveCapabilityPreferences } from '@/lib/capability-preference'
-import { ALL_SKILL_DOMAINS, buildSkillNormalizationContext, normalizeSkillDomain, type SkillDomain, type SkillMetadataLike } from '@/lib/skill-normalization'
+import { ALL_SKILL_DOMAINS, buildSkillNormalizationContext, DEFAULT_CONSOLE_SKILL_IDS, normalizeSkillDomain, type SkillDomain, type SkillMetadataLike } from '@/lib/skill-normalization'
 import { useI18n, type MessageKey } from '@/lib/i18n'
 import type { AppLocale } from '@/lib/stores/slices/preferences'
 import { cn } from '@/lib/utils'
@@ -133,9 +133,6 @@ function resolveCallableTools(
   selectedSkillIds.forEach((skillId) => {
     const toolIds = enabledToolIdsBySkill[skillId]
     if (!Array.isArray(toolIds)) {
-      if (skillDomainById[skillId] === 'structure-type') {
-        callableToolIds.add('validate_model')
-      }
       return
     }
     toolIds.forEach((toolId) => {
@@ -143,30 +140,9 @@ function resolveCallableTools(
         callableToolIds.add(toolId)
       }
     })
-    if (skillDomainById[skillId] === 'structure-type') {
-      callableToolIds.add('validate_model')
-    }
   })
 
   const toolById = new Map(matrixTools.map((tool) => [tool.id, tool]))
-  const queue = [...callableToolIds]
-  while (queue.length > 0) {
-    const toolId = queue.shift()
-    if (!toolId) {
-      continue
-    }
-    const tool = toolById.get(toolId)
-    if (!tool || !Array.isArray(tool.requiresTools)) {
-      continue
-    }
-    tool.requiresTools.forEach((requiredToolId) => {
-      if (typeof requiredToolId !== 'string' || requiredToolId.trim().length === 0 || callableToolIds.has(requiredToolId)) {
-        return
-      }
-      callableToolIds.add(requiredToolId)
-      queue.push(requiredToolId)
-    })
-  }
 
   return matrixTools.filter((tool) => callableToolIds.has(tool.id))
 }
@@ -215,7 +191,7 @@ export function CapabilitySettingsPanel() {
 
   const defaultSelectedSkillIds = useMemo(() => {
     const available = new Set(availableSkills.map((skill) => skill.id))
-    return ['opensees-static', 'generic'].filter((skillId) => available.has(skillId))
+    return [...DEFAULT_CONSOLE_SKILL_IDS].filter((skillId) => available.has(skillId))
   }, [availableSkills])
 
   const initialDefaultToolIds = useMemo(

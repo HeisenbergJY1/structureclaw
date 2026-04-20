@@ -4,7 +4,7 @@ import dynamic from 'next/dynamic'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import ReactMarkdown from 'react-markdown'
-import { ArrowUp, Bot, BrainCircuit, Clock3, Cuboid, FileText, Loader2, MessageSquarePlus, Orbit, Sparkles, Square, Trash2, User } from 'lucide-react'
+import { ArrowUp, Bot, BrainCircuit, Clock3, Cuboid, FileText, Loader2, Maximize2, MessageSquarePlus, Orbit, Sparkles, Square, Trash2, User } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -14,10 +14,19 @@ import { toast } from '@/components/ui/toast'
 import { buildVisualizationSnapshot } from '@/components/visualization/adapter'
 import type { VisualizationSnapshot } from '@/components/visualization/types'
 import { useI18n, type MessageKey } from '@/lib/i18n'
+import {
+  MessagePresentationView,
+  reducePresentationEvent,
+  type AssistantPresentation,
+  type TimelinePhaseGroup,
+  type TimelineStepItem,
+  type PresentationArtifactState,
+  type PresentationEvent,
+} from './message-presentation'
 import type { AppLocale } from '@/lib/stores/slices/preferences'
 import { API_BASE } from '@/lib/api-base'
 import { loadCapabilityPreferences, saveCapabilityPreferences } from '@/lib/capability-preference'
-import { ALL_SKILL_DOMAINS, buildSkillNormalizationContext, type SkillDomain, type SkillMetadataLike } from '@/lib/skill-normalization'
+import { ALL_SKILL_DOMAINS, buildSkillNormalizationContext, DEFAULT_CONSOLE_SKILL_IDS, type SkillDomain, type SkillMetadataLike } from '@/lib/skill-normalization'
 import { cn, formatDate, formatNumber } from '@/lib/utils'
 
 const StructuralVisualizationModal = dynamic(
@@ -35,6 +44,7 @@ type Message = {
   status?: 'streaming' | 'done' | 'error' | 'aborted'
   timestamp: string
   debugDetails?: MessageDebugDetails
+  presentation?: AssistantPresentation
 }
 
 type AgentToolCall = {
@@ -67,6 +77,7 @@ type MessageMetadata = {
   debugDetails?: MessageDebugDetails
   status?: 'done' | 'error' | 'aborted'
   traceId?: string
+  presentation?: AssistantPresentation
 }
 
 type AgentInteraction = {
@@ -111,6 +122,14 @@ type StreamPayload =
   | { type: 'start'; content?: { traceId?: string; conversationId?: string; startedAt?: string } }
   | { type: 'token'; content?: string }
   | { type: 'interaction_update'; content?: AgentInteraction }
+  | { type: 'presentation_init'; presentation?: AssistantPresentation }
+  | { type: 'phase_upsert'; phase?: TimelinePhaseGroup }
+  | { type: 'step_upsert'; phaseId?: string; step?: TimelineStepItem }
+  | { type: 'artifact_upsert'; artifact?: PresentationArtifactState }
+  | { type: 'artifact_payload_sync'; artifact?: 'model' | 'analysis' | 'report'; model?: Record<string, unknown>; latestResult?: AgentResult; snapshot?: VisualizationSnapshot }
+  | { type: 'summary_replace'; summaryText?: string }
+  | { type: 'presentation_complete'; completedAt?: string }
+  | { type: 'presentation_error'; phase?: string; message?: string }
   | { type: 'result'; content?: AgentResult }
   | { type: 'done' }
   | { type: 'error'; error?: string }
@@ -194,6 +213,7 @@ async function saveConversationMessagesToBackend(
     assistantContent: string
     assistantAborted?: boolean
     traceId?: string
+    assistantPresentation?: AssistantPresentation
   }
 ): Promise<void> {
   if (!conversationId) return
@@ -207,6 +227,7 @@ async function saveConversationMessagesToBackend(
         assistantContent: params.assistantContent,
         assistantAborted: params.assistantAborted,
         traceId: params.traceId,
+        assistantPresentation: params.assistantPresentation,
       }),
     })
   } catch (error) {
@@ -278,7 +299,7 @@ type CapabilityMatrixPayload = {
   skillAliasesByCanonicalId?: Record<string, string[]>
 }
 
-const DEFAULT_CONSOLE_SKILL_IDS = ['opensees-static', 'generic'] as const
+
 
 function resolveCallableTools(
   matrix: CapabilityMatrixPayload | null,
@@ -486,6 +507,72 @@ function parsePersistedDebugDetails(metadata: unknown): MessageDebugDetails | un
   }
 }
 
+function parsePersistedPresentation(metadata: unknown): AssistantPresentation | undefined {
+  const metadataRecord = toObjectRecord(metadata)
+  const presentationRecord = toObjectRecord(metadataRecord?.presentation)
+  if (!presentationRecord) {
+    return undefined
+  }
+
+  const status = presentationRecord.status === 'done'
+    || presentationRecord.status === 'error'
+    || presentationRecord.status === 'aborted'
+    || presentationRecord.status === 'streaming'
+    ? presentationRecord.status
+    : 'done'
+  const mode = presentationRecord.mode === 'conversation' ? 'conversation' : 'execution'
+  const summaryText = typeof presentationRecord.summaryText === 'string' ? presentationRecord.summaryText : ''
+  const traceId = typeof presentationRecord.traceId === 'string' ? presentationRecord.traceId : undefined
+  const startedAt = typeof presentationRecord.startedAt === 'string' ? presentationRecord.startedAt : undefined
+  const completedAt = typeof presentationRecord.completedAt === 'string' ? presentationRecord.completedAt : undefined
+  const errorMessage = typeof presentationRecord.errorMessage === 'string' ? presentationRecord.errorMessage : undefined
+
+  const artifacts = Array.isArray(presentationRecord.artifacts)
+    ? presentationRecord.artifacts.filter((item): item is PresentationArtifactState => Boolean(item && typeof item === 'object'))
+    : []
+
+  // Only v3 format is supported — use phases if present, otherwise degrade gracefully
+  if (presentationRecord.version === 3 && Array.isArray(presentationRecord.phases)) {
+    const phases: TimelinePhaseGroup[] = presentationRecord.phases
+      .filter((p): p is Record<string, unknown> => Boolean(p && typeof p === 'object'))
+      .map((p): TimelinePhaseGroup => ({
+        phaseId: typeof p.phaseId === 'string' ? p.phaseId : `phase:${p.phase ?? 'modeling'}`,
+        phase: (typeof p.phase === 'string' ? p.phase : 'modeling') as 'understanding' | 'modeling' | 'validation' | 'analysis' | 'report',
+        title: typeof p.title === 'string' ? p.title : undefined,
+        status: (typeof p.status === 'string' ? p.status : 'done') as 'pending' | 'running' | 'done' | 'error',
+        steps: Array.isArray(p.steps) ? p.steps as TimelineStepItem[] : [],
+        startedAt: typeof p.startedAt === 'string' ? p.startedAt : undefined,
+        completedAt: typeof p.completedAt === 'string' ? p.completedAt : undefined,
+      }))
+    return {
+      version: 3,
+      mode,
+      status,
+      summaryText,
+      phases,
+      artifacts,
+      traceId,
+      startedAt,
+      completedAt,
+      errorMessage,
+    }
+  }
+
+  // Legacy v1/v2 data — keep summary only, drop incompatible phase data
+  return {
+    version: 3,
+    mode,
+    status,
+    summaryText,
+    phases: [],
+    artifacts,
+    traceId,
+    startedAt,
+    completedAt,
+    errorMessage,
+  }
+}
+
 const LEGACY_ABORTED_SUFFIX_PATTERNS = [
   /\n\n---\n\*(?:Stream stopped|已停止)\*$/u,
   /（已停止）$/u,
@@ -519,11 +606,21 @@ function normalizePersistedMessage(message: Message): Message {
   const normalizedStatus = message.status === 'streaming'
     ? 'aborted'
     : (message.status ?? (hasLegacyAbortedSuffix(message.content) ? 'aborted' : 'done'))
+  const normalizedPresentation = message.presentation
+    ? {
+        ...message.presentation,
+        status: message.presentation.status === 'streaming' && normalizedStatus === 'aborted'
+          ? 'aborted'
+          : message.presentation.status,
+        summaryText: message.presentation.summaryText || stripLegacyAbortedSuffix(message.content),
+      }
+    : undefined
 
   return {
     ...message,
     content: stripLegacyAbortedSuffix(message.content),
     status: normalizedStatus,
+    presentation: normalizedPresentation,
   }
 }
 
@@ -1515,6 +1612,7 @@ export function AIConsole() {
   const [historyError, setHistoryError] = useState('')
   const [streamingSessions, setStreamingSessions] = useState<Map<string, StreamSession>>(new Map())
   const streamingSessionsRef = useRef<Map<string, StreamSession>>(new Map())
+  const currentPresentationRef = useRef<AssistantPresentation | null>(null)
   const conversationIdRef = useRef(conversationId)
   const submittingRef = useRef(false)
   const [isStreaming, setIsStreaming] = useState(false)
@@ -2260,6 +2358,7 @@ export function AIConsole() {
             status: parsePersistedMessageStatus(message.metadata, message.content),
             timestamp: message.createdAt,
             debugDetails: parsePersistedDebugDetails(message.metadata),
+            presentation: parsePersistedPresentation(message.metadata),
           }))
         : []
       const archivedMessages = archived?.messages || []
@@ -2530,6 +2629,7 @@ export function AIConsole() {
     const assistantMessageId = createId('assistant')
     const assistantSeed = t('assistantSeedAuto')
 
+    currentPresentationRef.current = null
     setErrorMessage('')
     setInput('')
     setVisualizationOpen(false)
@@ -2552,13 +2652,41 @@ export function AIConsole() {
     const traceId = assistantMessageId
     setIsStreaming(true)
 
+    const syncAssistantPresentationMessage = (
+      nextPresentation: AssistantPresentation,
+      nextStatus: Message['status'] = nextPresentation.status === 'done'
+        ? 'done'
+        : nextPresentation.status === 'error'
+          ? 'error'
+          : nextPresentation.status === 'aborted'
+            ? 'aborted'
+            : 'streaming',
+    ) => {
+      currentPresentationRef.current = nextPresentation
+      replaceMessageForConversation(activeConversationId, assistantMessageId, (message) => ({
+        ...message,
+        content: nextPresentation.summaryText || assistantContent,
+        status: nextStatus,
+        presentation: nextPresentation,
+      }))
+    }
+
     const finalizeAbortedTurn = async () => {
       const abortedContent = resolveAbortedAssistantContent(assistantContent, assistantSeed)
+      const abortedPresentation = currentPresentationRef.current
+        ? {
+            ...currentPresentationRef.current,
+            status: 'aborted' as const,
+            completedAt: currentPresentationRef.current.completedAt || new Date().toISOString(),
+            summaryText: currentPresentationRef.current.summaryText || abortedContent,
+          }
+        : undefined
 
       replaceMessageForConversation(activeConversationId, assistantMessageId, (message) => ({
         ...message,
         content: abortedContent,
         status: 'aborted',
+        presentation: abortedPresentation ?? message.presentation,
       }))
 
       // Note: manual localStorage write removed — replaceMessageForConversation
@@ -2574,6 +2702,7 @@ export function AIConsole() {
           assistantContent: abortedContent,
           assistantAborted: true,
           traceId,
+          assistantPresentation: abortedPresentation,
         })
       }
     }
@@ -2585,6 +2714,7 @@ export function AIConsole() {
       // Set conversationId immediately so the Stop button appears
       // without waiting for the SSE start event.
       if (nextConversationId !== conversationId) {
+        conversationIdRef.current = nextConversationId
         setConversationId(nextConversationId)
       }
 
@@ -2723,6 +2853,76 @@ export function AIConsole() {
             }
           }
 
+          if (payload.type === 'presentation_init' && payload.presentation) {
+            syncAssistantPresentationMessage(payload.presentation, 'streaming')
+          }
+
+          if (payload.type === 'phase_upsert' && payload.phase && currentPresentationRef.current) {
+            const nextPresentation = reducePresentationEvent(currentPresentationRef.current, {
+              type: 'phase_upsert',
+              phase: payload.phase,
+            })
+            syncAssistantPresentationMessage(nextPresentation, 'streaming')
+          }
+
+          if (payload.type === 'step_upsert' && payload.phaseId && payload.step && currentPresentationRef.current) {
+            const nextPresentation = reducePresentationEvent(currentPresentationRef.current, {
+              type: 'step_upsert',
+              phaseId: payload.phaseId,
+              step: payload.step,
+            })
+            syncAssistantPresentationMessage(nextPresentation, 'streaming')
+          }
+
+          if (payload.type === 'artifact_upsert' && payload.artifact && currentPresentationRef.current) {
+            const nextPresentation = reducePresentationEvent(currentPresentationRef.current, {
+              type: 'artifact_upsert',
+              artifact: payload.artifact,
+            })
+            syncAssistantPresentationMessage(nextPresentation, 'streaming')
+          }
+
+          if (payload.type === 'summary_replace' && typeof payload.summaryText === 'string' && currentPresentationRef.current) {
+            assistantContent = payload.summaryText
+            const nextPresentation = reducePresentationEvent(currentPresentationRef.current, {
+              type: 'summary_replace',
+              summaryText: payload.summaryText,
+            })
+            syncAssistantPresentationMessage(nextPresentation, 'streaming')
+          }
+
+          if (payload.type === 'presentation_complete' && typeof payload.completedAt === 'string' && currentPresentationRef.current) {
+            const nextPresentation = reducePresentationEvent(currentPresentationRef.current, {
+              type: 'presentation_complete',
+              completedAt: payload.completedAt,
+            })
+            syncAssistantPresentationMessage(nextPresentation, 'done')
+          }
+
+          if (payload.type === 'presentation_error' && payload.phase && payload.message && currentPresentationRef.current) {
+            assistantContent = payload.message || assistantContent
+            const nextPresentation = reducePresentationEvent(currentPresentationRef.current, {
+              type: 'presentation_error',
+              phase: payload.phase as 'understanding' | 'modeling' | 'validation' | 'analysis' | 'report',
+              message: payload.message,
+            })
+            syncAssistantPresentationMessage(nextPresentation, 'error')
+          }
+
+          if (payload.type === 'artifact_payload_sync') {
+            if (payload.artifact === 'model' && payload.model) {
+              if (activeConversationId === conversationIdRef.current) {
+                applySynchronizedModel(payload.model, 'tool')
+              }
+            }
+            if (payload.artifact === 'analysis' && payload.latestResult && activeConversationId === conversationIdRef.current) {
+              setLatestResult((current) => ({
+                ...(current || {}),
+                ...(payload.latestResult || {}),
+              }))
+            }
+          }
+
           if (payload.type === 'result' && payload.content && typeof payload.content === 'object') {
             const result = {
               ...(payload.content as AgentResult),
@@ -2730,7 +2930,7 @@ export function AIConsole() {
             const visualizationHints = extractVisualizationHints(result)
             const debugDetails = buildMessageDebugDetails(promptSnapshot, debugSkillIds, debugToolIds, result)
             if (result.model && typeof result.model === 'object' && !Array.isArray(result.model)) {
-              if (activeConversationId === conversationId) {
+              if (activeConversationId === conversationIdRef.current) {
                 applySynchronizedModel(result.model, result.analysis ? 'tool' : 'conversation')
               }
             }
@@ -2749,7 +2949,7 @@ export function AIConsole() {
             })
             receivedResult = true
             // Only update active conversation state when this is the foreground stream
-            if (activeConversationId === conversationId) {
+            if (activeConversationId === conversationIdRef.current) {
               setLatestResult(result)
               setLatestModelVisualizationSnapshot(modelSnapshot)
               setLatestResultVisualizationSnapshot(visualizationSnapshot)
@@ -2768,11 +2968,26 @@ export function AIConsole() {
               latestResult: result,
             }).catch(() => {})
             assistantContent = result.response || result.clarification?.question || t('returnedResult')
+            let nextPresentation: AssistantPresentation | null = currentPresentationRef.current
+            if (nextPresentation) {
+              if (!nextPresentation.summaryText) {
+                nextPresentation = reducePresentationEvent(nextPresentation, {
+                  type: 'summary_replace',
+                  summaryText: assistantContent,
+                })
+              }
+              nextPresentation = reducePresentationEvent(nextPresentation, {
+                type: 'presentation_complete',
+                completedAt: result.completedAt || new Date().toISOString(),
+              })
+              currentPresentationRef.current = nextPresentation
+            }
             replaceMessageForConversation(activeConversationId, assistantMessageId, (message) => ({
               ...message,
               content: assistantContent,
               status: 'done',
               debugDetails,
+              presentation: currentPresentationRef.current ?? message.presentation,
             }))
             shouldBumpConversationActivity = true
           }
@@ -2780,13 +2995,14 @@ export function AIConsole() {
           if (payload.type === 'error') {
             const nextError = typeof payload.error === 'string' ? payload.error : t('requestFailed')
             assistantContent = nextError
-            if (activeConversationId === conversationId) {
+            if (activeConversationId === conversationIdRef.current) {
               setErrorMessage(nextError)
             }
             replaceMessageForConversation(activeConversationId, assistantMessageId, (message) => ({
               ...message,
               content: assistantContent,
               status: 'error',
+              presentation: currentPresentationRef.current ?? message.presentation,
             }))
             shouldBumpConversationActivity = true
           }
@@ -2800,6 +3016,7 @@ export function AIConsole() {
           ...message,
           content: message.content || assistantSeed,
           status: message.status === 'error' ? 'error' : 'done',
+          presentation: currentPresentationRef.current ?? message.presentation,
         }))
         if (assistantContent !== assistantSeed || receivedResult) {
           shouldBumpConversationActivity = true
@@ -2815,15 +3032,17 @@ export function AIConsole() {
           replaceMessageForConversation(activeConversationId, assistantMessageId, (message) => ({
             ...message,
             status: message.status === 'error' ? 'error' : 'done',
+            presentation: currentPresentationRef.current ?? message.presentation,
           }))
         } else {
-          if (activeConversationId === conversationId) {
+          if (activeConversationId === conversationIdRef.current) {
             setErrorMessage(nextError)
           }
           replaceMessageForConversation(activeConversationId, assistantMessageId, (message) => ({
             ...message,
             content: nextError,
             status: 'error',
+            presentation: currentPresentationRef.current ?? message.presentation,
           }))
           shouldBumpConversationActivity = Boolean(activeConversationId)
         }
@@ -3056,20 +3275,50 @@ export function AIConsole() {
                       <span>{message.role === 'user' ? t('you') : t('structureClawAi')}</span>
                       <span className="text-slate-500">{formatDate(message.timestamp, locale)}</span>
                     </div>
-                    <div className="whitespace-pre-wrap text-sm leading-7">
-                      {message.role === 'assistant' ? renderContentWithLinks(message.content) : message.content}
-                      {message.status === 'streaming' && (
-                        <span className="ml-2 inline-flex h-2 w-2 rounded-full bg-cyan-300 shadow-[0_0_18px_rgba(103,232,249,0.9)]" />
-                      )}
-                      {message.status === 'aborted' && (
-                        <span className="ml-2 inline-flex items-center gap-1 text-xs text-rose-500 dark:text-rose-400">
-                          <Square className="h-2.5 w-2.5" />
-                          {t('streamAborted')}
-                        </span>
-                      )}
-                    </div>
+                    {message.presentation && (
+                      <MessagePresentationView
+                        presentation={message.presentation}
+                        t={t}
+                        resolveSkillName={(skillId: string) => {
+                          const skill = availableSkills.find((s) => s.id === skillId)
+                          if (!skill) return skillId
+                          return locale === 'zh' ? (skill.name.zh || skill.name.en || skillId) : (skill.name.en || skill.name.zh || skillId)
+                        }}
+                      />
+                    )}
+                    {!message.presentation && message.content && (
+                      <div className="whitespace-pre-wrap text-sm leading-7">
+                        {message.role === 'assistant' ? renderContentWithLinks(message.content) : message.content}
+                      </div>
+                    )}
+                    {message.status === 'streaming' && !message.presentation && (
+                      <div className="flex items-center gap-2 mt-2">
+                        <svg className="h-3.5 w-3.5 shrink-0 animate-spin text-cyan-600 dark:text-cyan-300" viewBox="0 0 24 24" fill="none">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                        </svg>
+                        <span className="text-sm text-muted-foreground">{t('presentationPlanning')}</span>
+                      </div>
+                    )}
+                    {message.status === 'aborted' && (
+                      <span className="ml-2 inline-flex items-center gap-1 text-xs text-rose-500 dark:text-rose-400">
+                        <Square className="h-2.5 w-2.5" />
+                        {t('streamAborted')}
+                      </span>
+                    )}
                     {message.role === 'assistant' && extractPdfUrl(message.content) && (
-                      <div className="mt-3 overflow-hidden rounded-xl border border-border/70 dark:border-white/10">
+                      <div className="group/pdf mt-3 overflow-hidden rounded-xl border border-border/70 dark:border-white/10">
+                        <div className="flex items-center justify-between border-b border-border/50 px-3 py-1.5 dark:border-white/10">
+                          <span className="text-xs font-medium text-muted-foreground">PDF</span>
+                          <button
+                            type="button"
+                            onClick={() => window.open(extractPdfUrl(message.content)!, '_blank')}
+                            className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                          >
+                            <Maximize2 className="h-3 w-3" />
+                            {locale === 'zh' ? '全屏查看' : 'Fullscreen'}
+                          </button>
+                        </div>
                         <iframe
                           src={extractPdfUrl(message.content)!}
                           className="h-[480px] w-full border-0"
@@ -3077,7 +3326,7 @@ export function AIConsole() {
                         />
                       </div>
                     )}
-                    {message.role === 'assistant' && message.debugDetails && (
+                    {message.role === 'assistant' && message.debugDetails && !message.presentation && (
                       <details className="mt-3 rounded-2xl border border-border/70 bg-background/60 px-3 py-2 dark:border-white/10 dark:bg-slate-950/40">
                         <summary className="cursor-pointer text-xs font-medium uppercase tracking-[0.16em] text-muted-foreground">
                           {t('promptThinkingToggle')}

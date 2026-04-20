@@ -66,7 +66,19 @@ import {
   buildInteractionCheckpoint,
 } from './agent-pipeline-state.js';
 import { computeDependencyFingerprint, computeDraftStateContentHash } from '../agent-runtime/artifact-helpers.js';
-import type { ArtifactKind, SchedulerStep, ProjectPipelineState } from '../agent-runtime/types.js';
+import type { ArtifactEnvelope, ArtifactKind, SchedulerStep, ProjectPipelineState } from '../agent-runtime/types.js';
+import {
+  createEmptyAssistantPresentation,
+  buildPhaseId,
+  phaseTitle,
+  toolTitle,
+  skillIdForToolCall,
+  type PresentationPhase,
+  type AssistantPresentation,
+  type ArtifactState,
+  type TimelineStepItem,
+  type TimelinePhaseGroup,
+} from './chat-presentation.js';
 
 export type AgentToolName = 'draft_model' | 'update_model' | 'convert_model' | 'validate_model' | 'run_analysis' | 'run_code_check' | 'generate_report';
 export type AgentOrchestrationMode = 'directed' | 'llm-planned';
@@ -325,11 +337,31 @@ export interface AgentRunResult {
   response: string;
 }
 
-export interface AgentStreamChunk {
-  type: 'start' | 'interaction_update' | 'result' | 'done' | 'error';
-  content?: unknown;
-  error?: string;
-}
+export type PublicPresentationChunk =
+  | { type: 'presentation_init'; presentation: AssistantPresentation }
+  | { type: 'phase_upsert'; phase: TimelinePhaseGroup }
+  | { type: 'step_upsert'; phaseId: string; step: TimelineStepItem }
+  | { type: 'artifact_upsert'; artifact: ArtifactState }
+  | {
+      type: 'artifact_payload_sync';
+      artifact: 'model' | 'analysis' | 'report';
+      model?: Record<string, unknown>;
+      latestResult?: Record<string, unknown>;
+      snapshot?: Record<string, unknown>;
+    }
+  | { type: 'summary_replace'; summaryText: string }
+  | { type: 'presentation_complete'; completedAt: string }
+  | { type: 'presentation_error'; phase: PresentationPhase; message: string; createdAt?: string };
+
+export type AgentStreamChunk =
+  | { type: 'start'; content?: unknown }
+  | { type: 'interaction_update'; content?: unknown }
+  | { type: 'result'; content?: unknown }
+  | { type: 'done' }
+  | { type: 'error'; error?: string }
+  | PublicPresentationChunk;
+
+export type StepEventCallback = (chunk: AgentStreamChunk) => void;
 
 // --- Phase 4: Scheduler integration helpers ---
 
@@ -399,6 +431,106 @@ function computeStepInputFingerprint(
     refs[ref.kind] = { artifactId: ref.artifactId, revision: ref.revision };
   }
   return computeDependencyFingerprint(refs, pipelineState.bindings);
+}
+
+function mapToolToPresentationPhase(tool: string): 'modeling' | 'validation' | 'analysis' | 'report' {
+  if (tool === 'validate_model') return 'validation';
+  if (tool === 'run_analysis' || tool === 'postprocess_result' || tool === 'run_code_check') return 'analysis';
+  if (tool === 'generate_report') return 'report';
+  return 'modeling';
+}
+
+function mapArtifactEnvelopeToPresentationArtifact(
+  artifact: Pick<ArtifactEnvelope, 'kind'> | undefined,
+): ArtifactState['artifact'] | undefined {
+  if (!artifact?.kind) {
+    return undefined;
+  }
+  if (artifact.kind === 'normalizedModel') {
+    return 'model';
+  }
+  if (artifact.kind === 'analysisRaw' || artifact.kind === 'postprocessedResult' || artifact.kind === 'codeCheckResult') {
+    return 'analysis';
+  }
+  if (artifact.kind === 'reportArtifact') {
+    return 'report';
+  }
+  return undefined;
+}
+
+function buildArtifactUpsertState(
+  artifact: ArtifactState['artifact'],
+  locale: AppLocale,
+): ArtifactState {
+  if (artifact === 'model') {
+    return {
+      artifact,
+      status: 'available',
+      title: locale === 'zh' ? '结构模型' : 'Structural model',
+      summary: locale === 'zh' ? '模型已生成，可立即预览' : 'The model is ready for preview',
+      previewable: true,
+      snapshotKey: 'modelSnapshot',
+    };
+  }
+  if (artifact === 'analysis') {
+    return {
+      artifact,
+      status: 'available',
+      title: locale === 'zh' ? '分析结果' : 'Analysis results',
+      summary: locale === 'zh' ? '分析结果已可查看' : 'Analysis results are available',
+      previewable: true,
+      snapshotKey: 'resultSnapshot',
+    };
+  }
+  return {
+    artifact,
+    status: 'available',
+    title: locale === 'zh' ? '报告' : 'Report',
+    summary: locale === 'zh' ? '报告内容已生成' : 'Report content is available',
+    previewable: true,
+  };
+}
+
+function buildArtifactPayloadChunk(
+  artifact: ArtifactState['artifact'],
+  payload: Record<string, unknown>,
+  latestModel?: Record<string, unknown>,
+): Extract<PublicPresentationChunk, { type: 'artifact_payload_sync' }> {
+  if (artifact === 'model') {
+    return { type: 'artifact_payload_sync', artifact, model: payload };
+  }
+  if (artifact === 'analysis') {
+    return {
+      type: 'artifact_payload_sync',
+      artifact,
+      latestResult: latestModel ? { analysis: payload, model: latestModel } : { analysis: payload },
+    };
+  }
+  return {
+    type: 'artifact_payload_sync',
+    artifact,
+    latestResult: latestModel ? { report: payload, model: latestModel } : { report: payload },
+  };
+}
+
+function normalizePresentationPayload(payload: unknown): Record<string, unknown> | undefined {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return undefined;
+  }
+  return payload as Record<string, unknown>;
+}
+
+function buildInteractionTimelineTitle(interaction: AgentInteraction, locale: AppLocale): string {
+  if (interaction.state === 'collecting') {
+    return locale === 'zh' ? '补充建模信息' : 'Need more modeling details';
+  }
+  if (interaction.state === 'confirming') {
+    return locale === 'zh' ? '等待设计确认' : 'Waiting on design confirmation';
+  }
+  if (interaction.state === 'blocked') {
+    return locale === 'zh' ? '交互已阻止' : 'Interaction blocked';
+  }
+  return locale === 'zh' ? '交互更新' : 'Interaction update';
 }
 
 function applySchedulerStepResult(args: {
@@ -1008,6 +1140,75 @@ export class AgentService {
           {
             type: 'object',
             properties: {
+              type: { const: 'presentation_init' },
+              presentation: { type: 'object' },
+            },
+            required: ['type', 'presentation'],
+          },
+          {
+            type: 'object',
+            properties: {
+              type: { const: 'phase_upsert' },
+              phase: { type: 'object' },
+            },
+            required: ['type', 'phase'],
+          },
+          {
+            type: 'object',
+            properties: {
+              type: { const: 'step_upsert' },
+              phaseId: { type: 'string' },
+              step: { type: 'object' },
+            },
+            required: ['type', 'phaseId', 'step'],
+          },
+          {
+            type: 'object',
+            properties: {
+              type: { const: 'artifact_upsert' },
+              artifact: { type: 'object' },
+            },
+            required: ['type', 'artifact'],
+          },
+          {
+            type: 'object',
+            properties: {
+              type: { const: 'artifact_payload_sync' },
+              artifact: { enum: ['model', 'analysis', 'report'] },
+              model: { type: 'object' },
+              latestResult: { type: 'object' },
+              snapshot: { type: 'object' },
+            },
+            required: ['type', 'artifact'],
+          },
+          {
+            type: 'object',
+            properties: {
+              type: { const: 'summary_replace' },
+              summaryText: { type: 'string' },
+            },
+            required: ['type', 'summaryText'],
+          },
+          {
+            type: 'object',
+            properties: {
+              type: { const: 'presentation_complete' },
+              completedAt: { type: 'string' },
+            },
+            required: ['type', 'completedAt'],
+          },
+          {
+            type: 'object',
+            properties: {
+              type: { const: 'presentation_error' },
+              phase: { type: 'string' },
+              message: { type: 'string' },
+            },
+            required: ['type', 'phase', 'message'],
+          },
+          {
+            type: 'object',
+            properties: {
               type: { const: 'result' },
               content: { type: 'object' },
             },
@@ -1083,28 +1284,128 @@ export class AgentService {
           startedAt,
         },
       };
+      yield {
+        type: 'presentation_init',
+        presentation: createEmptyAssistantPresentation({
+          traceId,
+          mode: strategy.allowToolCall ? 'execution' : 'conversation',
+          startedAt,
+        }),
+      };
 
       if (signal?.aborted) {
+        yield {
+          type: 'presentation_complete',
+          completedAt: new Date().toISOString(),
+        };
         yield { type: 'done' };
         return;
       }
 
-      const result = await this.runInternal({ ...preparedInput, traceId }, traceId, strategy, signal);
+      // Relay step events from runInternal through this generator.
+      const stepEventQueue: AgentStreamChunk[] = [];
+      let stepEventNotify: (() => void) | null = null;
+
+      const onStepEvent: StepEventCallback = (chunk: AgentStreamChunk) => {
+        stepEventQueue.push(chunk);
+        stepEventNotify?.();
+        stepEventNotify = null;
+      };
+
+      // Start runInternal — it calls onStepEvent synchronously from its step loop
+      const resultPromise = this.runInternal(
+        { ...preparedInput, traceId }, traceId, strategy, signal, onStepEvent,
+      );
+
+      // Interleave: yield step events as they arrive, then await the final result.
+      let resultSettled = false;
+      let resolvedResult: AgentRunResult | undefined;
+      resultPromise.then((r) => { resultSettled = true; resolvedResult = r; });
+
+      while (!resultSettled) {
+        // Drain any already-queued events
+        while (stepEventQueue.length > 0) {
+          yield stepEventQueue.shift()!;
+        }
+        if (resultSettled) break;
+
+        // Create a promise that resolves when the next step event arrives
+        const nextEventPromise = new Promise<void>((resolve) => {
+          stepEventNotify = resolve;
+        });
+
+        // Race: next step event vs result completion
+        await Promise.race([nextEventPromise, resultPromise]);
+
+        // Drain events that arrived during the race
+        while (stepEventQueue.length > 0) {
+          yield stepEventQueue.shift()!;
+        }
+      }
+
+      // Flush any events queued between last drain and result resolution
+      while (stepEventQueue.length > 0) {
+        yield stepEventQueue.shift()!;
+      }
+
+      const result = resolvedResult ?? await resultPromise;
       if (result.interaction && result.interaction.state !== 'completed') {
+        const locale = this.resolveInteractionLocale(preparedInput.context?.locale);
+        const phase = result.interaction.state === 'collecting' ? 'understanding' : 'modeling';
         yield {
-          type: 'interaction_update',
-          content: result.interaction,
+          type: 'phase_upsert',
+          phase: {
+            phaseId: buildPhaseId(phase),
+            phase,
+            title: phaseTitle(phase, locale),
+            status: 'running',
+            steps: [],
+          },
         };
+        const clarificationQuestion = result.clarification?.question?.trim();
+        if (result.interaction.state === 'collecting'
+          || result.interaction.state === 'confirming'
+          || result.interaction.state === 'blocked') {
+          const responseText = result.response?.trim() || clarificationQuestion || '';
+          yield {
+            type: 'step_upsert',
+            phaseId: buildPhaseId(phase),
+            step: {
+              id: `clarification:${result.interaction.turnId ?? result.completedAt}`,
+              phase,
+              status: 'done',
+              tool: 'clarification',
+              title: buildInteractionTimelineTitle(result.interaction, locale),
+              output: responseText ? { question: clarificationQuestion, response: responseText, missingCritical: result.interaction.missingCritical, missingOptional: result.interaction.missingOptional } : undefined,
+              startedAt: result.completedAt,
+              completedAt: result.completedAt,
+            },
+          };
+        }
+        yield { type: 'interaction_update', content: result.interaction };
+      } else if (result.response.trim().length > 0) {
+        // Non-tool response: just summary, no steps needed
       }
       yield {
-        type: 'result',
-        content: result,
+        type: 'summary_replace',
+        summaryText: result.response,
+      };
+      yield { type: 'result', content: result };
+      yield {
+        type: 'presentation_complete',
+        completedAt: result.completedAt,
       };
       yield { type: 'done' };
     } catch (error: any) {
       if (signal?.aborted) {
         return;
       }
+      yield {
+        type: 'presentation_error',
+        phase: 'modeling',
+        message: this.stringifyError(error),
+        createdAt: new Date().toISOString(),
+      };
       yield {
         type: 'error',
         error: this.stringifyError(error),
@@ -1117,6 +1418,7 @@ export class AgentService {
     traceId: string,
     strategy: AgentRunStrategy,
     signal?: AbortSignal,
+    onStepEvent?: StepEventCallback,
   ): Promise<AgentRunResult> {
     const startedAtMs = Date.now();
     const startedAt = new Date(startedAtMs).toISOString();
@@ -1363,6 +1665,29 @@ export class AgentService {
         }
       }
 
+      const bindDefaultSkill = (domain: string, key: keyof typeof pipelineState.bindings) => {
+        if (!pipelineState.bindings[key]) {
+          const resolved = this.skillRuntime.resolveDefaultSkillForDomain(domain);
+          if (resolved && activeSkillIds?.includes(resolved)) {
+            pipelineState = {
+              ...pipelineState,
+              bindings: { ...pipelineState.bindings, [key]: resolved },
+            };
+          }
+        }
+      };
+
+      bindDefaultSkill('validation', 'validationSkillId');
+      bindDefaultSkill('report-export', 'reportSkillId');
+      bindDefaultSkill('drawing', 'drawingSkillId');
+      bindDefaultSkill('result-postprocess', 'postprocessSkillId');
+
+      // Pre-resolve structural skill from selected skills so scheduler and
+      // emitStepUpdate can show the skill badge even before draft_model runs.
+      const preResolvedStructuralSkillId = workingSession.structuralTypeMatch?.skillId
+        || workingSession.draft?.skillId
+        || await this.resolveStructuralSkillFromActive(skillIds);
+
       const schedulerPlan = this.pipelineScheduler.plan({
         message: params.message,
         locale,
@@ -1380,6 +1705,7 @@ export class AgentService {
         },
         consumerContracts: await this.resolveConsumerContracts(skillIds ?? []),
         enricherContracts: await this.resolveEnricherContracts(skillIds ?? []),
+        structuralSkillId: preResolvedStructuralSkillId,
       });
 
       if (schedulerPlan.blockedReason) {
@@ -1504,6 +1830,89 @@ export class AgentService {
         }
       }
 
+      const emitStepUpdate = (
+        step: SchedulerStep,
+        updates: {
+          status: 'running' | 'done' | 'error';
+          startedAtIso: string;
+          completedAtIso?: string;
+          durationMs?: number;
+          artifact?: ArtifactEnvelope;
+          errorMessage?: string;
+        },
+      ): void => {
+        const phase = mapToolToPresentationPhase(step.tool);
+        const phaseId = buildPhaseId(phase);
+
+        if (updates.status === 'running') {
+          onStepEvent?.({
+            type: 'phase_upsert',
+            phase: {
+              phaseId,
+              phase,
+              title: phaseTitle(phase, locale),
+              status: 'running',
+              steps: [],
+            },
+          });
+        }
+
+        onStepEvent?.({
+          type: 'step_upsert',
+          phaseId,
+          step: {
+            id: `step:${step.tool}:${updates.startedAtIso}`,
+            phase,
+            status: updates.status,
+            tool: step.tool,
+            skillId: step.skillId || skillIdForToolCall(step.tool, {
+              structuralSkillId: workingSession.structuralTypeMatch?.skillId || workingSession.draft?.skillId || preResolvedStructuralSkillId,
+              validationSkillId: pipelineState.bindings.validationSkillId,
+              analysisSkillId: pipelineState.bindings.analysisProviderSkillId,
+              codeCheckSkillId: pipelineState.bindings.codeCheckProviderSkillId,
+              reportSkillId: pipelineState.bindings.reportSkillId,
+            }) || undefined,
+            title: toolTitle(step.tool, updates.status, locale),
+            reason: step.reason,
+            output: updates.artifact?.payload,
+            errorMessage: updates.errorMessage,
+            startedAt: updates.startedAtIso,
+            completedAt: updates.completedAtIso,
+            durationMs: updates.durationMs,
+          },
+        });
+
+        if (updates.status === 'done' && updates.artifact) {
+          const presentationArtifact = mapArtifactEnvelopeToPresentationArtifact(updates.artifact);
+          if (presentationArtifact) {
+            onStepEvent?.({
+              type: 'artifact_upsert',
+              artifact: buildArtifactUpsertState(presentationArtifact, locale),
+            });
+            // Only push model visualization to right panel during streaming;
+            // analysis/report will sync via the final 'result' event to avoid
+            // showing incomplete data on the right panel.
+            if (presentationArtifact === 'model') {
+              const payload = normalizePresentationPayload(updates.artifact.payload);
+              if (payload) {
+                onStepEvent?.(buildArtifactPayloadChunk(presentationArtifact, payload, workingSession.latestModel));
+              }
+            }
+          }
+        }
+      };
+
+      onStepEvent?.({
+        type: 'phase_upsert',
+        phase: {
+          phaseId: buildPhaseId('modeling'),
+          phase: 'modeling',
+          title: phaseTitle('modeling', locale),
+          status: 'running',
+          steps: [],
+        },
+      });
+
       for (const step of schedulerPlan.requiredSteps) {
         try {
           this.runtimeBinder.assertStepAuthorized({
@@ -1549,6 +1958,22 @@ export class AgentService {
             skillIds, plan, toolCalls, sessionKey, workingSession,
             response: disabledToolResponse,
             blockedReasonCode: 'TOOL_DISABLED',
+            needsModelInput: false,
+          });
+        }
+
+        // Strict mode: block steps whose tool is not in the active tool set
+        if (!this.hasActiveTool(activeToolIds, stepToolId)) {
+          const missingToolResponse = this.localize(
+            locale,
+            `执行流程需要工具 \`${stepToolId}\`，但该工具未启用。请在能力设置中启用对应的技能或工具。`,
+            `Pipeline requires tool \`${stepToolId}\` but it is not enabled. Please enable the corresponding skill or tool in capability settings.`,
+          );
+          return this.finalizeBlockedRunResult({
+            params, traceId, startedAt, startedAtMs, locale, orchestrationMode,
+            skillIds, plan, toolCalls, sessionKey, workingSession,
+            response: missingToolResponse,
+            blockedReasonCode: 'TOOL_NOT_ACTIVE',
             needsModelInput: false,
           });
         }
@@ -1693,9 +2118,12 @@ export class AgentService {
           }, skillIds, workingSession, skillIds);
         }
 
-        // execute / transform
         const stepStartedAtMs = Date.now();
         const stepStartedAt = new Date(stepStartedAtMs).toISOString();
+
+        emitStepUpdate(step, { status: 'running', startedAtIso: stepStartedAt });
+
+        // execute / transform
         let stepResult: { artifact?: import('../agent-runtime/types.js').ArtifactEnvelope; runRecord?: import('../agent-runtime/types.js').RunRecord; draftMeta?: { structuralTypeMatch?: any; nextState?: any } };
         try {
           stepResult = await this.skillRuntime.executeScheduledStep({
@@ -1744,6 +2172,13 @@ export class AgentService {
             error: stepErrorMessage,
             errorCode,
             durationMs: Date.now() - stepStartedAtMs,
+          });
+          emitStepUpdate(step, {
+            status: 'error',
+            startedAtIso: stepStartedAt,
+            completedAtIso: new Date().toISOString(),
+            durationMs: Date.now() - stepStartedAtMs,
+            errorMessage: stepErrorMessage,
           });
           // DRAFT_INCOMPLETE: fall back to conversation mode for clarification prompts.
           // In directed mode (forced execution), override success to false — the pipeline
@@ -1806,11 +2241,7 @@ export class AgentService {
           output: stepResult.artifact?.payload,
         });
         pipelineState = applySchedulerStepResult({ pipelineState, step, stepResult });
-        // Step 3.2: Write back normalizedModel to workingSession for backward compatibility
-        if (stepResult.artifact?.kind === 'normalizedModel' && stepResult.artifact.payload) {
-          workingSession.latestModel = stepResult.artifact.payload as Record<string, unknown>;
-        }
-        // Step 3.3: Write back draft metadata (structuralTypeMatch, draft state) from draft/update steps
+        // Step 3.3: Write back draft metadata BEFORE emitStepUpdate so skillId is available
         if (stepResult.draftMeta) {
           if (stepResult.draftMeta.structuralTypeMatch) {
             workingSession.structuralTypeMatch = stepResult.draftMeta.structuralTypeMatch;
@@ -1819,6 +2250,17 @@ export class AgentService {
             workingSession.draft = stepResult.draftMeta.nextState;
           }
         }
+        // Step 3.2: Write back normalizedModel to workingSession for backward compatibility
+        if (stepResult.artifact?.kind === 'normalizedModel' && stepResult.artifact.payload) {
+          workingSession.latestModel = stepResult.artifact.payload as Record<string, unknown>;
+        }
+        emitStepUpdate(step, {
+          status: 'done',
+          startedAtIso: stepStartedAt,
+          completedAtIso: new Date().toISOString(),
+          durationMs: Date.now() - stepStartedAtMs,
+          artifact: stepResult.artifact,
+        });
         if (projectId && stepResult.runRecord) {
           await this.runStore.updateRun(stepResult.runRecord.runId, {
             status: stepResult.runRecord.status,
@@ -1902,6 +2344,7 @@ export class AgentService {
             const fbStepStartedAt = new Date(fbStepStartedAtMs).toISOString();
             let fbResult: { artifact?: import('../agent-runtime/types.js').ArtifactEnvelope; runRecord?: import('../agent-runtime/types.js').RunRecord };
             try {
+              emitStepUpdate(fbStep, { status: 'running', startedAtIso: fbStepStartedAt });
               fbResult = await this.skillRuntime.executeScheduledStep({
                 step: fbStep,
                 pipelineState,
@@ -1925,6 +2368,13 @@ export class AgentService {
                 errorCode: 'STEP_EXECUTION_FAILED',
                 durationMs: Date.now() - fbStepStartedAtMs,
               });
+              emitStepUpdate(fbStep, {
+                status: 'error',
+                startedAtIso: fbStepStartedAt,
+                completedAtIso: new Date().toISOString(),
+                durationMs: Date.now() - fbStepStartedAtMs,
+                errorMessage: fbErrorMessage,
+              });
               return this.finalizeBlockedRunResult({
                 params, traceId, startedAt, startedAtMs, locale, orchestrationMode,
                 skillIds, plan, toolCalls, sessionKey, workingSession,
@@ -1938,6 +2388,13 @@ export class AgentService {
               completedAt: new Date().toISOString(),
               durationMs: Date.now() - fbStepStartedAtMs,
               output: fbResult.artifact?.payload,
+            });
+            emitStepUpdate(fbStep, {
+              status: 'done',
+              startedAtIso: fbStepStartedAt,
+              completedAtIso: new Date().toISOString(),
+              durationMs: Date.now() - fbStepStartedAtMs,
+              artifact: fbResult.artifact,
             });
             pipelineState = applySchedulerStepResult({ pipelineState, step: fbStep, stepResult: fbResult });
           }
@@ -1959,16 +2416,32 @@ export class AgentService {
           sessionArtifacts: {},
           projectArtifacts: pipelineState.artifacts,
           enricherContracts: await this.resolveEnricherContracts(skillIds ?? []),
+          structuralSkillId: preResolvedStructuralSkillId,
         });
         if (!codeCheckPlan.blockedReason && codeCheckPlan.requiredSteps.length > 0) {
           for (const ccStep of codeCheckPlan.requiredSteps) {
             if (ccStep.mode === 'reuse') continue;
             // Skip validate_model — model was already validated in the main pipeline.
             if (ccStep.tool === 'validate_model') continue;
+            if (!this.hasActiveTool(activeToolIds, ccStep.tool)) {
+              emitStepUpdate(ccStep, {
+                status: 'error',
+                startedAtIso: new Date(Date.now()).toISOString(),
+                completedAtIso: new Date().toISOString(),
+                durationMs: 0,
+                errorMessage: this.localize(
+                  locale,
+                  `工具 ${ccStep.tool} 未启用`,
+                  `Tool ${ccStep.tool} is not enabled`,
+                ),
+              });
+              break;
+            }
             const ccStepStartedAtMs = Date.now();
             const ccStepStartedAt = new Date(ccStepStartedAtMs).toISOString();
             let ccStepResult: { artifact?: import('../agent-runtime/types.js').ArtifactEnvelope; runRecord?: import('../agent-runtime/types.js').RunRecord };
             try {
+              emitStepUpdate(ccStep, { status: 'running', startedAtIso: ccStepStartedAt });
               ccStepResult = await this.skillRuntime.executeScheduledStep({
                 step: ccStep,
                 pipelineState,
@@ -1992,6 +2465,13 @@ export class AgentService {
                 errorCode: 'STEP_EXECUTION_FAILED',
                 durationMs: Date.now() - ccStepStartedAtMs,
               });
+              emitStepUpdate(ccStep, {
+                status: 'error',
+                startedAtIso: ccStepStartedAt,
+                completedAtIso: new Date().toISOString(),
+                durationMs: Date.now() - ccStepStartedAtMs,
+                errorMessage: ccStepErrorMessage,
+              });
               break;
             }
             pushToolCall(ccStep, 'success', {
@@ -1999,6 +2479,13 @@ export class AgentService {
               completedAt: new Date().toISOString(),
               durationMs: Date.now() - ccStepStartedAtMs,
               output: ccStepResult.artifact?.payload,
+            });
+            emitStepUpdate(ccStep, {
+              status: 'done',
+              startedAtIso: ccStepStartedAt,
+              completedAtIso: new Date().toISOString(),
+              durationMs: Date.now() - ccStepStartedAtMs,
+              artifact: ccStepResult.artifact,
             });
             pipelineState = applySchedulerStepResult({ pipelineState, step: ccStep, stepResult: ccStepResult });
           }
@@ -2022,14 +2509,30 @@ export class AgentService {
           projectArtifacts: pipelineState.artifacts,
           consumerContracts: await this.resolveConsumerContracts(skillIds ?? []),
           enricherContracts: await this.resolveEnricherContracts(skillIds ?? []),
+          structuralSkillId: preResolvedStructuralSkillId,
         });
         if (!reportPlan.blockedReason && reportPlan.requiredSteps.length > 0) {
           for (const reportStep of reportPlan.requiredSteps) {
             if (reportStep.mode === 'reuse') continue;
+            if (!this.hasActiveTool(activeToolIds, reportStep.tool)) {
+              emitStepUpdate(reportStep, {
+                status: 'error',
+                startedAtIso: new Date(Date.now()).toISOString(),
+                completedAtIso: new Date().toISOString(),
+                durationMs: 0,
+                errorMessage: this.localize(
+                  locale,
+                  `工具 ${reportStep.tool} 未启用`,
+                  `Tool ${reportStep.tool} is not enabled`,
+                ),
+              });
+              break;
+            }
             const rStepStartedAtMs = Date.now();
             const rStepStartedAt = new Date(rStepStartedAtMs).toISOString();
             let rStepResult: { artifact?: import('../agent-runtime/types.js').ArtifactEnvelope; runRecord?: import('../agent-runtime/types.js').RunRecord };
             try {
+              emitStepUpdate(reportStep, { status: 'running', startedAtIso: rStepStartedAt });
               rStepResult = await this.skillRuntime.executeScheduledStep({
                 step: reportStep,
                 pipelineState,
@@ -2053,6 +2556,13 @@ export class AgentService {
                 errorCode: 'STEP_EXECUTION_FAILED',
                 durationMs: Date.now() - rStepStartedAtMs,
               });
+              emitStepUpdate(reportStep, {
+                status: 'error',
+                startedAtIso: rStepStartedAt,
+                completedAtIso: new Date().toISOString(),
+                durationMs: Date.now() - rStepStartedAtMs,
+                errorMessage: rStepErrorMessage,
+              });
               break; // Don't fail the whole result for a report error
             }
             pushToolCall(reportStep, 'success', {
@@ -2060,6 +2570,13 @@ export class AgentService {
               completedAt: new Date().toISOString(),
               durationMs: Date.now() - rStepStartedAtMs,
               output: rStepResult.artifact?.payload,
+            });
+            emitStepUpdate(reportStep, {
+              status: 'done',
+              startedAtIso: rStepStartedAt,
+              completedAtIso: new Date().toISOString(),
+              durationMs: Date.now() - rStepStartedAtMs,
+              artifact: rStepResult.artifact,
             });
             pipelineState = applySchedulerStepResult({ pipelineState, step: reportStep, stepResult: rStepResult });
           }
@@ -3962,6 +4479,13 @@ export class AgentService {
         skillId: m.id,
         priority: (m.runtimeContract as { priority?: number })?.priority ?? m.priority,
       }));
+  }
+
+  private async resolveStructuralSkillFromActive(activeSkillIds?: string[]): Promise<string | undefined> {
+    if (!activeSkillIds || activeSkillIds.length === 0) return undefined;
+    const manifests = await this.skillRuntime.listSkillManifests();
+    const activeSet = new Set(activeSkillIds);
+    return manifests.find((m) => m.domain === 'structure-type' && activeSet.has(m.id))?.id;
   }
 
   private buildResolvedRouting(

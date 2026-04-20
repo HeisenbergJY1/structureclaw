@@ -196,7 +196,19 @@ export class AgentSkillRuntime {
     if (matchedSelected.length > 0) {
       return matchedSelected[0];
     }
+    // Strict mode: only return analysis skills the user explicitly selected.
+    // No fallback to any analysis skill outside the selected set.
+    if (selectedSkillIds.size > 0) {
+      return undefined;
+    }
     return analysisSkills.find((skill) => matchesContext(skill));
+  }
+
+  resolveDefaultSkillForDomain(domain: string): string | undefined {
+    const match = this.builtinSkillFileManifests
+      .filter((s) => s.domain === domain)
+      .sort((a, b) => b.priority - a.priority)[0];
+    return match?.id;
   }
 
   async executeAnalysisSkill(options: {
