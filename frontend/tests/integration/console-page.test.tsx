@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import ConsolePage from '../../src/app/(console)/console/page'
 import type { VisualizationSnapshot } from '../../src/components/visualization'
+import { API_BASE } from '@/lib/api-base'
 import { CAPABILITY_PREFERENCE_STORAGE_KEY } from '@/lib/capability-preference'
 import { clearLocaleCookie, LOCALE_STORAGE_KEY, normalizeLocale } from '@/lib/locale-preference'
 import { AppStoreProvider } from '@/lib/stores/context'
@@ -155,6 +156,8 @@ const archivedResult = {
   },
 }
 
+const modelJsonPlaceholderPattern = /Paste StructureModel v2 JSON here|将 StructureModel v2 JSON 粘贴到这里/
+
 function createSseResponse(events: unknown[]) {
   const encoder = new TextEncoder()
   const chunks = events.map((event) => `data: ${JSON.stringify(event)}\n\n`).concat('data: [DONE]\n\n')
@@ -295,7 +298,7 @@ describe('ConsolePage Integration (CONS-13)', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Expand Engineering Context|展开工程上下文/ }))
 
-    const modelInput = screen.getByPlaceholderText(/Paste StructureModel v1 JSON here|将 StructureModel v1 JSON 粘贴到这里/)
+    const modelInput = screen.getByPlaceholderText(modelJsonPlaceholderPattern)
     fireEvent.change(modelInput, { target: { value: sampleModelJson } })
 
     await waitFor(() => {
@@ -637,12 +640,14 @@ describe('ConsolePage Integration (CONS-13)', () => {
     }))
     expect(screen.getByText(/Stream stopped|已停止/)).toBeInTheDocument()
 
-    const stored = JSON.parse(window.localStorage.getItem('structureclaw.console.conversations') || '{}')
-    expect(stored['conv-stop']?.messages?.at(-1)).toEqual(expect.objectContaining({
-      role: 'assistant',
-      content: '',
-      status: 'aborted',
-    }))
+    await waitFor(() => {
+      const stored = JSON.parse(window.localStorage.getItem('structureclaw.console.conversations') || '{}')
+      expect(stored['conv-stop']?.messages?.at(-1)).toEqual(expect.objectContaining({
+        role: 'assistant',
+        content: '',
+        status: 'aborted',
+      }))
+    })
   })
 
   it.skipIf(!hasLlmKey)('shows conversation-list timeout when the backend request hangs', async () => {
@@ -789,7 +794,7 @@ describe('ConsolePage Integration (CONS-13)', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Expand Engineering Context|展开工程上下文/ }))
 
-    const modelInput = screen.getByPlaceholderText(/Paste StructureModel v1 JSON here|将 StructureModel v1 JSON 粘贴到这里/) as HTMLTextAreaElement
+    const modelInput = screen.getByPlaceholderText(modelJsonPlaceholderPattern) as HTMLTextAreaElement
     expect(modelInput.value).toContain('"schema_version": "1.0.0"')
     expect(screen.queryByText(/^Design Code$|^设计规范$/)).not.toBeInTheDocument()
     expect(screen.getByText('Archived summary')).toBeInTheDocument()
@@ -871,7 +876,7 @@ describe('ConsolePage Integration (CONS-13)', () => {
     fireEvent.click(screen.getByRole('button', { name: /New Conversation|新建对话/ }))
     fireEvent.click(screen.getByRole('button', { name: /Expand Engineering Context|展开工程上下文/ }))
 
-    const modelInput = screen.getByPlaceholderText(/Paste StructureModel v1 JSON here|将 StructureModel v1 JSON 粘贴到这里/) as HTMLTextAreaElement
+    const modelInput = screen.getByPlaceholderText(modelJsonPlaceholderPattern) as HTMLTextAreaElement
     expect(modelInput.value).toBe('')
     expect(screen.queryByText('Archived summary')).not.toBeInTheDocument()
     expect(screen.queryByText(/Analysis Engine Auto|计算引擎 自动选择/)).not.toBeInTheDocument()
@@ -1010,7 +1015,7 @@ describe('ConsolePage Integration (CONS-13)', () => {
     })
 
     fireEvent.click(screen.getByRole('button', { name: /Expand Engineering Context|展开工程上下文/ }))
-    const modelInput = screen.getByPlaceholderText(/Paste StructureModel v1 JSON here|将 StructureModel v1 JSON 粘贴到这里/) as HTMLTextAreaElement
+    const modelInput = screen.getByPlaceholderText(modelJsonPlaceholderPattern) as HTMLTextAreaElement
     fireEvent.change(modelInput, { target: { value: sampleModelJson } })
 
     const titleButtons = screen.getAllByRole('button').filter((button) => (
@@ -1529,6 +1534,339 @@ describe('ConsolePage Integration (CONS-13)', () => {
     expect(screen.getByText(/Actual engine builtin-simplified|实际引擎 builtin-simplified/)).toBeInTheDocument()
   })
 
+  it('renders markdown body fields in the execution summary and guidance panel', async () => {
+    window.localStorage.setItem(LOCALE_STORAGE_KEY, 'en')
+    const interaction = {
+      detectedStructuralType: 'unknown',
+      interactionStageLabel: 'Intent',
+      missingCritical: [],
+      missingOptional: [],
+      fallbackSupportNote: 'Use the **generic** structure skill first.',
+      recommendedNextStep: 'Confirm the **system** and main loads.',
+      questions: [],
+      pending: {
+        criticalMissing: [],
+        nonCriticalMissing: [],
+      },
+    }
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input)
+      const supportResponse = mockConsoleSupportRequest(url)
+      if (supportResponse) {
+        return supportResponse
+      }
+
+      if (url.includes('/api/v1/analysis-engines')) {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue({ engines: [] }),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/chat/conversations')) {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue([]),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/chat/conversation') && init?.method === 'POST') {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue({
+            id: 'conv-markdown-guidance',
+            title: 'Markdown guidance',
+            type: 'general',
+            createdAt: '2026-04-20T08:00:00.000Z',
+            updatedAt: '2026-04-20T08:00:00.000Z',
+          }),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/chat/stream')) {
+        return createSseResponse([
+          {
+            type: 'result',
+            content: {
+              response: 'Continue with **intent** collection.',
+              success: true,
+              interaction,
+            },
+          },
+        ])
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    await renderConsolePage()
+
+    fireEvent.change(screen.getByPlaceholderText(/Describe your structural goal|描述你的结构目标/), {
+      target: { value: 'Render markdown guidance' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /^Send$|^发送$/ }))
+
+    await waitFor(() => {
+      expect(screen.getByTestId('console-guidance-panel')).toBeInTheDocument()
+    })
+
+    const executionHeader = screen.getByRole('heading', { name: 'Execution Summary' }).parentElement
+    expect(executionHeader).not.toBeNull()
+    expect(within(executionHeader as HTMLElement).getByText('intent', { selector: 'strong' })).toBeInTheDocument()
+
+    const guidancePanel = screen.getByTestId('console-guidance-panel')
+    expect(within(guidancePanel).getByText('intent', { selector: 'strong' })).toBeInTheDocument()
+    expect(within(guidancePanel).getByText('generic', { selector: 'strong' })).toBeInTheDocument()
+    expect(within(guidancePanel).getByText('system', { selector: 'strong' })).toBeInTheDocument()
+  })
+
+  it('renders markdown summaries and gfm tables in the report panel', async () => {
+    window.localStorage.setItem(LOCALE_STORAGE_KEY, 'en')
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input)
+      const supportResponse = mockConsoleSupportRequest(url)
+      if (supportResponse) {
+        return supportResponse
+      }
+
+      if (url.includes('/api/v1/analysis-engines')) {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue({ engines: [] }),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/chat/conversations')) {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue([]),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/chat/conversation') && init?.method === 'POST') {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue({
+            id: 'conv-markdown-report',
+            title: 'Markdown report',
+            type: 'general',
+            createdAt: '2026-04-20T08:00:00.000Z',
+            updatedAt: '2026-04-20T08:00:00.000Z',
+          }),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/chat/stream')) {
+        return createSseResponse([
+          {
+            type: 'result',
+            content: {
+              response: 'Report is ready.',
+              success: true,
+              report: {
+                summary: 'Report **insight** is available.',
+                markdown: [
+                  '| Case | Drift |',
+                  '| --- | --- |',
+                  '| SLS | 1/350 |',
+                ].join('\n'),
+              },
+            },
+          },
+        ])
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    await renderConsolePage()
+
+    fireEvent.change(screen.getByPlaceholderText(/Describe your structural goal|描述你的结构目标/), {
+      target: { value: 'Render markdown report' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /^Send$|^发送$/ }))
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /^Report$|^报告$/ })).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /^Report$|^报告$/ }))
+
+    await waitFor(() => {
+      expect(screen.getByText('insight', { selector: 'strong' })).toBeInTheDocument()
+    })
+    const reportTable = screen.getByRole('table')
+    expect(within(reportTable).getByRole('columnheader', { name: 'Case' })).toBeInTheDocument()
+    expect(within(reportTable).getByRole('columnheader', { name: 'Drift' })).toBeInTheDocument()
+    expect(within(reportTable).getByText('SLS')).toBeInTheDocument()
+    expect(within(reportTable).getByText('1/350')).toBeInTheDocument()
+  })
+
+  it('rewrites backend-relative markdown links to API_BASE urls', async () => {
+    window.localStorage.setItem(LOCALE_STORAGE_KEY, 'en')
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input)
+      const supportResponse = mockConsoleSupportRequest(url)
+      if (supportResponse) {
+        return supportResponse
+      }
+
+      if (url.includes('/api/v1/analysis-engines')) {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue({ engines: [] }),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/chat/conversations')) {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue([]),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/chat/conversation') && init?.method === 'POST') {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue({
+            id: 'conv-markdown-links',
+            title: 'Markdown links',
+            type: 'general',
+            createdAt: '2026-04-20T08:00:00.000Z',
+            updatedAt: '2026-04-20T08:00:00.000Z',
+          }),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/chat/stream')) {
+        return createSseResponse([
+          {
+            type: 'result',
+            content: {
+              response: 'Execution done.',
+              success: true,
+              report: {
+                summary: '[Download artifact](/api/v1/files/serve?path=report.md)',
+                markdown: '[Open backend file](/api/v1/files/serve?path=report.md)',
+              },
+            },
+          },
+        ])
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    await renderConsolePage()
+
+    fireEvent.change(screen.getByPlaceholderText(/Describe your structural goal|描述你的结构目标/), {
+      target: { value: 'Render markdown links' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /^Send$|^发送$/ }))
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /^Report$|^报告$/ })).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /^Report$|^报告$/ }))
+
+    await waitFor(() => {
+      expect(screen.getByRole('link', { name: 'Download artifact' })).toHaveAttribute('href', `${API_BASE}/api/v1/files/serve?path=report.md`)
+    })
+    expect(screen.getByRole('link', { name: 'Open backend file' })).toHaveAttribute('href', `${API_BASE}/api/v1/files/serve?path=report.md`)
+  })
+
+  it('keeps compact paragraph spacing out of the report markdown containers', async () => {
+    window.localStorage.setItem(LOCALE_STORAGE_KEY, 'en')
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input)
+      const supportResponse = mockConsoleSupportRequest(url)
+      if (supportResponse) {
+        return supportResponse
+      }
+
+      if (url.includes('/api/v1/analysis-engines')) {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue({ engines: [] }),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/chat/conversations')) {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue([]),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/chat/conversation') && init?.method === 'POST') {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue({
+            id: 'conv-markdown-spacing',
+            title: 'Markdown spacing',
+            type: 'general',
+            createdAt: '2026-04-20T08:00:00.000Z',
+            updatedAt: '2026-04-20T08:00:00.000Z',
+          }),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/chat/stream')) {
+        return createSseResponse([
+          {
+            type: 'result',
+            content: {
+              response: 'First paragraph.\n\nSecond paragraph.',
+              success: true,
+              report: {
+                summary: 'Summary first paragraph.\n\nSummary second paragraph.',
+                markdown: 'Body first paragraph.\n\nBody second paragraph.',
+              },
+            },
+          },
+        ])
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    await renderConsolePage()
+
+    fireEvent.change(screen.getByPlaceholderText(/Describe your structural goal|描述你的结构目标/), {
+      target: { value: 'Render markdown spacing' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /^Send$|^发送$/ }))
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /^Analysis$|^分析结果$/ })).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByRole('button', { name: /^Analysis$|^分析结果$/ }))
+
+    const executionSummaryParagraph = screen.getByText('First paragraph.').closest('p')
+    expect(executionSummaryParagraph).not.toBeNull()
+    const executionMarkdownContainer = executionSummaryParagraph?.parentElement
+    expect(executionMarkdownContainer).toHaveClass('prose-p:my-0')
+
+    fireEvent.click(screen.getByRole('button', { name: /^Report$|^报告$/ }))
+
+    await waitFor(() => {
+      expect(screen.getByText('Summary first paragraph.')).toBeInTheDocument()
+    })
+
+    const reportSummaryParagraph = screen.getByText('Summary first paragraph.').closest('p')
+    expect(reportSummaryParagraph).not.toBeNull()
+    expect(reportSummaryParagraph?.parentElement).not.toHaveClass('prose-p:my-0')
+
+    const reportBodyParagraph = screen.getByText('Body first paragraph.').closest('p')
+    expect(reportBodyParagraph).not.toBeNull()
+    expect(reportBodyParagraph?.parentElement).not.toHaveClass('prose-p:my-0')
+  })
+
   it('does not show an engine manager action on the conversation page', async () => {
     await renderConsolePage()
 
@@ -1681,7 +2019,7 @@ describe('ConsolePage Integration (CONS-13)', () => {
     await renderConsolePage()
 
     fireEvent.click(screen.getByRole('button', { name: /Expand Engineering Context|展开工程上下文/ }))
-    const modelInput = screen.getByPlaceholderText(/Paste StructureModel v1 JSON here|将 StructureModel v1 JSON 粘贴到这里/)
+    const modelInput = screen.getByPlaceholderText(modelJsonPlaceholderPattern)
     fireEvent.change(modelInput, { target: { value: '{"schema_version":' } })
     fireEvent.change(screen.getByPlaceholderText(/Describe your structural goal|描述你的结构目标/), {
       target: { value: 'Please draft a beam model' },
@@ -1825,7 +2163,7 @@ describe('ConsolePage Integration (CONS-13)', () => {
     await renderConsolePage()
 
     fireEvent.click(screen.getByRole('button', { name: /Expand Engineering Context|展开工程上下文/ }))
-    fireEvent.change(screen.getByPlaceholderText(/Paste StructureModel v1 JSON here|将 StructureModel v1 JSON 粘贴到这里/), {
+    fireEvent.change(screen.getByPlaceholderText(modelJsonPlaceholderPattern), {
       target: { value: sampleModelJson },
     })
     fireEvent.change(screen.getByPlaceholderText(/Describe your structural goal|描述你的结构目标/), {
@@ -1910,7 +2248,7 @@ describe('ConsolePage Integration (CONS-13)', () => {
     setCapabilityPreferences(['generic', 'opensees-static', 'code-check-gb50017'])
     await renderConsolePage()
     fireEvent.click(screen.getByRole('button', { name: /Expand Engineering Context|展开工程上下文/ }))
-    fireEvent.change(screen.getByPlaceholderText(/Paste StructureModel v1 JSON here|将 StructureModel v1 JSON 粘贴到这里/), {
+    fireEvent.change(screen.getByPlaceholderText(modelJsonPlaceholderPattern), {
       target: { value: sampleModelJson },
     })
     fireEvent.change(screen.getByPlaceholderText(/Describe your structural goal|描述你的结构目标/), {
@@ -1983,7 +2321,7 @@ describe('ConsolePage Integration (CONS-13)', () => {
     await renderConsolePage()
 
     fireEvent.click(screen.getByRole('button', { name: /Expand Engineering Context|展开工程上下文/ }))
-    fireEvent.change(screen.getByPlaceholderText(/Paste StructureModel v1 JSON here|将 StructureModel v1 JSON 粘贴到这里/), {
+    fireEvent.change(screen.getByPlaceholderText(modelJsonPlaceholderPattern), {
       target: { value: sampleModelJson },
     })
     fireEvent.change(screen.getByPlaceholderText(/Describe your structural goal|描述你的结构目标/), {
