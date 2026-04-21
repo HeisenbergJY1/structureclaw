@@ -3,8 +3,7 @@
 import dynamic from 'next/dynamic'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
-import ReactMarkdown, { defaultUrlTransform, type Components } from 'react-markdown'
-import remarkGfm from 'remark-gfm'
+import { MarkdownBody } from './markdown-body'
 import { ArrowUp, Bot, BrainCircuit, Clock3, Cuboid, FileText, Loader2, Maximize2, MessageSquarePlus, Orbit, Sparkles, Square, Trash2, User } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -300,35 +299,6 @@ type CapabilityMatrixPayload = {
   skillAliasesByCanonicalId?: Record<string, string[]>
 }
 
-const MARKDOWN_BODY_BASE_CLASS = 'prose prose-sm max-w-none prose-headings:text-foreground prose-p:text-muted-foreground prose-strong:text-foreground prose-code:text-cyan-700 prose-pre:bg-muted/60 prose-a:text-cyan-700 prose-a:no-underline hover:prose-a:text-cyan-600 prose-table:my-4 prose-table:w-full prose-th:border prose-th:border-border/70 prose-th:bg-background/70 prose-th:px-3 prose-th:py-2 prose-th:text-left prose-th:text-foreground prose-td:border prose-td:border-border/50 prose-td:px-3 prose-td:py-2 prose-td:text-muted-foreground dark:prose-invert dark:prose-code:text-cyan-200 dark:prose-pre:bg-black/30 dark:prose-a:text-cyan-200 dark:hover:prose-a:text-cyan-100 dark:prose-th:border-white/10 dark:prose-th:bg-white/5 dark:prose-td:border-white/10'
-const MARKDOWN_BODY_COMPACT_CLASS = `${MARKDOWN_BODY_BASE_CLASS} prose-p:my-0`
-
-function rewriteMarkdownUrl(url: string) {
-  const safeUrl = defaultUrlTransform(url)
-  return safeUrl.startsWith('/') ? `${API_BASE}${safeUrl}` : safeUrl
-}
-
-const MARKDOWN_COMPONENTS: Components = {
-  a: ({ href, ...props }) => <a {...props} href={href} target="_blank" rel="noopener noreferrer" />,
-}
-
-function MarkdownBody({
-  content,
-  className,
-  compact = false,
-}: {
-  content: string
-  className?: string
-  compact?: boolean
-}) {
-  return (
-    <div className={cn(compact ? MARKDOWN_BODY_COMPACT_CLASS : MARKDOWN_BODY_BASE_CLASS, className)}>
-      <ReactMarkdown components={MARKDOWN_COMPONENTS} remarkPlugins={[remarkGfm]} urlTransform={rewriteMarkdownUrl}>
-        {content}
-      </ReactMarkdown>
-    </div>
-  )
-}
 
 
 
@@ -1586,7 +1556,6 @@ function AnalysisPanel({
   )
 }
 
-const LINK_RE = /\[([^\]]+)\]\(([^)\s]+)\)/g
 const PDF_LINK_RE = /\[PDF[^\]]*\]\(([^)\s]+)\)/
 
 function extractPdfUrl(content: string): string | null {
@@ -1595,24 +1564,6 @@ function extractPdfUrl(content: string): string | null {
   const relative = m[1]
   if (relative.startsWith('http') || relative.startsWith('//')) return relative
   return `${API_BASE}${relative}`
-}
-
-function renderContentWithLinks(content: string) {
-  const parts: (string | JSX.Element)[] = []
-  let last = 0
-  for (const m of content.matchAll(LINK_RE)) {
-    if (m.index > last) parts.push(content.slice(last, m.index))
-    const rawUrl = m[2]
-    const label = m[1]
-    const url = rawUrl.startsWith('/') ? `${API_BASE}${rawUrl}` : rawUrl
-    parts.push(
-      <a key={m.index} href={url} target="_blank" rel="noopener noreferrer" className="text-cyan-400 underline hover:text-cyan-300">{label}</a>,
-    )
-    last = (m.index ?? 0) + m[0].length
-  }
-  if (parts.length === 0) return content
-  if (last < content.length) parts.push(content.slice(last))
-  return <>{parts}</>
 }
 
 export function AIConsole() {
@@ -3358,9 +3309,9 @@ export function AIConsole() {
                       />
                     )}
                     {!message.presentation && message.content && (
-                      <div className="whitespace-pre-wrap text-sm leading-7">
-                        {message.role === 'assistant' ? renderContentWithLinks(message.content) : message.content}
-                      </div>
+                      message.role === 'assistant'
+                        ? <MarkdownBody compact content={message.content} />
+                        : <div className="whitespace-pre-wrap text-sm leading-7">{message.content}</div>
                     )}
                     {message.status === 'streaming' && !message.presentation && (
                       <div className="flex items-center gap-2 mt-2">
