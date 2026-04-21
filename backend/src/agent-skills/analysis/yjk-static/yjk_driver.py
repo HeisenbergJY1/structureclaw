@@ -244,8 +244,13 @@ def _run(model_path: str, work_dir: str, yjks_root: str) -> int:
         _error("YJK crashed during layer support setup")
         return 1
 
-    # -- Phase 5: Preprocessing + full analysis -------------------------
-    print("[yjk_driver] Phase 5: preprocessing + calculation", file=sys.stderr, flush=True)
+    # -- Phase 5: Preprocessing + kick off analysis ----------------------
+    # Preprocessing steps (genmodrel, transload) are fast and must finish
+    # before the model is usable.  The heavy design calculation
+    # (yjkdesign_dsncalculating_all) can take an unpredictable amount of
+    # time, so we launch it in a background thread and return immediately.
+    # The user can monitor progress and view results directly in the YJK GUI.
+    print("[yjk_driver] Phase 5: preprocessing", file=sys.stderr, flush=True)
     if not _run_cmd("yjkspre_genmodrel"):
         _error("YJK crashed during model relation generation")
         return 1
@@ -258,22 +263,31 @@ def _run(model_path: str, work_dir: str, yjks_root: str) -> int:
     if not _run_cmd("SetCurrentLabel", "IDSPRE_ROOT"):
         _error("YJK crashed during label switch")
         return 1
-    if not _run_cmd("yjkdesign_dsncalculating_all"):
-        _error("YJK crashed during design calculation - this often happens when the model has no valid structural data or missing sections")
-        return 1
-    if not _run_cmd("SetCurrentLabel", "IDDSN_DSP"):
-        _error("YJK crashed during final label switch")
-        return 1
 
-    print("[yjk_driver] Phase 5 complete: analysis finished", file=sys.stderr, flush=True)
+    print("[yjk_driver] Phase 5: preprocessing done, launching calculation in background", file=sys.stderr, flush=True)
 
-    # -- Phase 6: Skip result extraction for now -------------------------
-    # TODO: implement structured result extraction via yjks_pyload
-    print("[yjk_driver] Phase 6: result extraction skipped (not yet implemented)", file=sys.stderr, flush=True)
+    # Fire-and-forget: start the heavy calculation in a daemon thread so
+    # the driver can return immediately.  The YJK GUI stays open and the
+    # user can observe progress there.
+    import threading
 
-    # -- Phase 7: Build final output ------------------------------------
+    def _background_calc() -> None:
+        try:
+            _run_cmd("yjkdesign_dsncalculating_all")
+            _run_cmd("SetCurrentLabel", "IDDSN_DSP")
+            print("[yjk_driver] background calculation finished", file=sys.stderr, flush=True)
+        except Exception as exc:
+            print(f"[yjk_driver] background calculation error: {exc}", file=sys.stderr, flush=True)
+
+    calc_thread = threading.Thread(target=_background_calc, daemon=True)
+    calc_thread.start()
+    # Give the thread a moment to issue the RunCmd call to YJK before we exit.
+    # The YJK GUI process is independent — once the command is dispatched,
+    # calculation continues even after this driver process exits.
+    calc_thread.join(timeout=5)
+
+    # -- Build final output (return immediately) ------------------------
     warnings: list[str] = []
-    warnings.append("Structured result extraction not yet implemented; returning .OUT files as fallback")
 
     output: dict = {
         "status": "success",
@@ -284,12 +298,17 @@ def _run(model_path: str, work_dir: str, yjks_root: str) -> int:
             "work_dir": work_dir,
         },
         "data": {},
-        "detailed": {"raw_output": _collect_out_files(work_dir)},
+        "detailed": {
+            "message": "模型已导入YJK并启动计算，请在YJK中查看计算进度和结果。"
+                       " / Model imported into YJK and calculation started. "
+                       "Please check progress and results in the YJK application.",
+            "yjk_project": yjk_project,
+        },
         "warnings": warnings,
     }
 
     _emit_json(output)
-    print("[yjk_driver] done", file=sys.stderr, flush=True)
+    print("[yjk_driver] done — calculation running in YJK", file=sys.stderr, flush=True)
     return 0
 
 
