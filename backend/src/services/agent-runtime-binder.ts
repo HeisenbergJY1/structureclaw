@@ -1,5 +1,5 @@
 import type { DraftState, StructuralTypeMatch } from '../agent-runtime/index.js';
-import type { SkillManifest, ToolManifest } from '../agent-runtime/types.js';
+import type { ProviderBindingState, SchedulerStep, SkillManifest, ToolManifest } from '../agent-runtime/types.js';
 
 export type RuntimeBinderActiveToolSet = Set<string>;
 
@@ -44,6 +44,7 @@ interface RuntimeBindingSkillRuntimeLike {
     skillIdsByToolId: Record<string, string[]>;
   }>;
   listBuiltinToolManifests(): ToolManifest[];
+  resolveDefaultSkillForDomain(domain: string): string | undefined;
 }
 
 interface RuntimeBindingPolicyLike {
@@ -59,7 +60,7 @@ export class AgentRuntimeBinder {
   constructor(
     private readonly skillRuntime: RuntimeBindingSkillRuntimeLike,
     private readonly policy: RuntimeBindingPolicyLike,
-    private readonly foundationToolIds: readonly string[] = ['convert_model'],
+    private readonly foundationToolIds: readonly string[] = ['convert_model', 'enrich_model'],
   ) {}
 
   normalizeSkillIds(skillIds?: string[]): string[] {
@@ -70,83 +71,34 @@ export class AgentRuntimeBinder {
 
   async resolveActiveDomainSkillIds(args: {
     selectedSkillIds?: string[];
+    providerBindings?: ProviderBindingState;
     workingSession: RuntimeBinderSession;
     modelInput?: Record<string, unknown>;
     message: string;
     context?: RuntimeBinderContext;
     hasEmptySkillSelection?: (skillIds?: string[]) => boolean;
   }): Promise<string[] | undefined> {
+    const selectedSkillIds = this.normalizeSkillIds(args.selectedSkillIds);
+    const activatedSkillIds = new Set<string>(selectedSkillIds);
+
+    // Provider-first path: when caller explicitly passes providerBindings,
+    // only activate selected skills + bound providers (Phase 4 scheduler path).
+    // When providerBindings is NOT in args, fall through to legacy auto-activation.
+    if ('providerBindings' in args) {
+      if (args.providerBindings?.analysisProviderSkillId) {
+        activatedSkillIds.add(args.providerBindings.analysisProviderSkillId);
+      }
+      if (args.providerBindings?.codeCheckProviderSkillId) {
+        activatedSkillIds.add(args.providerBindings.codeCheckProviderSkillId);
+      }
+      return Array.from(activatedSkillIds).sort();
+    }
+
+    // Strict mode: only use skills the user explicitly selected.
+    // No auto-activation of any skill — validation, analysis, report, code-check,
+    // postprocess, structural-type — all must come from the user's selection.
     if (args.hasEmptySkillSelection?.(args.selectedSkillIds)) {
       return [];
-    }
-
-    const selectedSkillIds = this.normalizeSkillIds(args.selectedSkillIds);
-    const manifests = await this.skillRuntime.listSkillManifests();
-    const activatedSkillIds = new Set<string>(selectedSkillIds);
-    const selectedSkillSet = new Set(selectedSkillIds);
-    const structuralSkillId = args.workingSession.structuralTypeMatch?.skillId
-      || args.workingSession.draft?.skillId
-      || manifests.find((manifest) => manifest.domain === 'structure-type' && selectedSkillSet.has(manifest.id))?.id;
-    if (structuralSkillId) {
-      activatedSkillIds.add(structuralSkillId);
-    }
-
-    const hasStructuralContext = Boolean(structuralSkillId || args.workingSession.draft || args.modelInput || args.workingSession.latestModel);
-    const hasExecutionIntent = this.policy.inferExecutionIntent(args.message) || this.policy.inferProceedIntent(args.message);
-    const analysisType = args.workingSession.resolved?.analysisType
-      || args.context?.analysisType
-      || this.policy.inferAnalysisType?.(args.message)
-      || 'static';
-    const explicitDesignCode = args.workingSession.resolved?.designCode
-      || args.context?.designCode
-      || this.policy.inferDesignCode?.(args.message);
-    const designCode = explicitDesignCode || this.skillRuntime.resolveCodeCheckDesignCodeFromSkillIds(selectedSkillIds);
-    const codeCheckIntent = this.policy.inferCodeCheckIntent?.(args.message) ?? false;
-    const reportIntent = this.policy.inferReportIntent?.(args.message);
-
-    const shouldActivateValidation = hasStructuralContext
-      || hasExecutionIntent
-      || codeCheckIntent
-      || reportIntent === true;
-    if (shouldActivateValidation) {
-      activatedSkillIds.add('validation-structure-model');
-    }
-
-    if (hasStructuralContext || hasExecutionIntent || args.context?.autoAnalyze === true) {
-      const preferredAnalysisSkill = this.skillRuntime.resolvePreferredAnalysisSkill({
-        analysisType,
-        engineId: args.context?.engineId,
-        skillIds: selectedSkillIds,
-        supportedModelFamilies: this.resolvePreferredAnalysisModelFamilies({
-          workingSession: args.workingSession,
-          modelInput: args.modelInput,
-        }),
-      });
-      if (preferredAnalysisSkill) {
-        activatedSkillIds.add(preferredAnalysisSkill.id);
-      }
-    }
-
-    const shouldActivateCodeCheck = Boolean(designCode) && (
-      args.workingSession.resolved?.autoCodeCheck
-      ?? args.context?.autoCodeCheck
-      ?? codeCheckIntent
-      ?? true
-    );
-    if (shouldActivateCodeCheck) {
-      const codeCheckSkillId = this.skillRuntime.resolveCodeCheckSkillId(designCode);
-      if (codeCheckSkillId) {
-        activatedSkillIds.add(codeCheckSkillId);
-      }
-    }
-
-    const shouldActivateReport = (
-      args.workingSession.resolved?.includeReport
-      ?? args.context?.includeReport
-      ?? true
-    ) && (hasStructuralContext || hasExecutionIntent || reportIntent === true);
-    if (shouldActivateReport) {
-      activatedSkillIds.add('report-export-builtin');
     }
 
     if (activatedSkillIds.size === 0) {
@@ -154,6 +106,67 @@ export class AgentRuntimeBinder {
     }
 
     return Array.from(activatedSkillIds).sort();
+  }
+
+  async resolveProviderBindingRequirements(args: {
+    selectedSkillIds?: string[];
+    requiredSlots: Array<'analysisProvider' | 'codeCheckProvider'>;
+    bindings?: ProviderBindingState;
+    modelFamily?: string;
+    analysisType?: string;
+    designCode?: string;
+  }): Promise<{ blockedReason?: string }> {
+    const manifests = await this.skillRuntime.listSkillManifests();
+    const selectedSkillSet = new Set(this.normalizeSkillIds(args.selectedSkillIds));
+
+    for (const slot of args.requiredSlots) {
+      const candidates = manifests.filter((manifest) => {
+        const rc = manifest.runtimeContract;
+        return selectedSkillSet.has(manifest.id)
+          && rc?.role === 'provider'
+          && (rc as { providerSlot?: string }).providerSlot === slot;
+      });
+      const boundSkillId = slot === 'analysisProvider'
+        ? args.bindings?.analysisProviderSkillId
+        : args.bindings?.codeCheckProviderSkillId;
+      if (candidates.length > 1 && !boundSkillId) {
+        return { blockedReason: `${slot} binding required because multiple provider candidates are selected` };
+      }
+
+      const boundManifest = boundSkillId
+        ? manifests.find((m) => m.id === boundSkillId)
+        : candidates[0];
+      if (boundManifest?.runtimeContract && args.modelFamily) {
+        const contract = boundManifest.runtimeContract as any;
+        if (contract.supportedModelFamilies && !contract.supportedModelFamilies.includes(args.modelFamily)) {
+          return { blockedReason: 'provider incompatible' };
+        }
+      }
+    }
+
+    return {};
+  }
+
+  assertStepAuthorized(args: {
+    step: SchedulerStep;
+    selectedSkillIds?: string[];
+    bindings?: ProviderBindingState;
+  }): void {
+    // Provider-slot binding checks (skip for reuse — no execution needed)
+    if (args.step.mode !== 'reuse') {
+      if (args.step.role === 'provider' && args.step.provides === 'analysisRaw' && !args.bindings?.analysisProviderSkillId) {
+        throw new Error('analysisProvider binding required');
+      }
+      if (args.step.role === 'provider' && args.step.provides === 'codeCheckResult' && !args.bindings?.codeCheckProviderSkillId) {
+        throw new Error('codeCheckProvider binding required');
+      }
+    }
+
+    // Skill authorization: when a step declares a skillId, it must be in the selected set
+    if (args.step.skillId && args.selectedSkillIds && args.selectedSkillIds.length > 0
+      && !args.selectedSkillIds.includes(args.step.skillId)) {
+      throw new Error('skill not in selected skill set');
+    }
   }
 
   async resolveAvailableTooling(

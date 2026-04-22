@@ -120,6 +120,113 @@ skill 内声明的 `engineId` 只是静态路由提示，并不等于该 engine 
 
 因此，engine 可用性是一个运行时闸门，会直接影响后续 skill 是否能够参与执行。某个 skill 可以已经成功加载进 taxonomy，但如果它依赖的 engine 当前不可用或不兼容，仍然必须在执行阶段被过滤掉。
 
+### 2.7 skill.yaml 中的 runtimeContract
+
+`skill.yaml` 中的 `runtimeContract` 字段声明了技能如何参与目标调度器的工件图。它用显式的提供者和消费者声明替代了隐式激活。
+
+#### 2.7.1 SkillRole 变体
+
+每个技能通过 `runtimeContract.role` 声明自己的角色。已定义的八种角色：
+
+| 角色 | 描述 |
+|------|------|
+| `entry` | 管线中的第一个技能。接收原始用户输入并产生初始工件（例如 `structure-type` 产生草稿模型）。 |
+| `enricher` | 向已有工件添加信息而不改变其类型（例如向草稿添加荷载/边界条件）。 |
+| `validator` | 检查工件的正确性并丰富源工件（例如校验会向 `normalizedModel` 添加质量元数据；不存在单独的 `validationResult` 工件类型）。 |
+| `assistant` | 提供指导或解释，不产生或修改工件。 |
+| `provider` | 产生其他技能消费的工件。声明 `providerSlot` 供调度器绑定。 |
+| `consumer` | 消费其他技能产生的工件。声明 `requiredConsumes` 和/或 `optionalConsumes`。 |
+| `designer` | 对工件提出设计修改建议。使用 `providesPatches` 和 `autoIteration` 驱动设计反馈循环。 |
+| `transformer` | 将一种工件类型转换为另一种（例如将草稿模型转换为分析输入）。 |
+
+#### 2.7.2 提供者槽位与选择策略
+
+角色为 `provider` 的技能在其运行时合约中声明 `providerSlot`：
+
+```yaml
+runtimeContract:
+  role: provider
+  providerSlot: analysisProvider   # 或 codeCheckProvider
+  consumes:
+    - analysisModel
+  provides:
+    - analysisRaw
+```
+
+- `providerSlot`：调度器用于将该提供者绑定到工件图中某个工件的稳定标识符。已定义的两个槽位是 `analysisProvider`（对应 `analysisRaw`）和 `codeCheckProvider`（对应 `codeCheckResult`）。
+- 调度器的 `planDependencyPath` 在管线状态 `bindings` 中未找到对应绑定时，会以 `'analysisProvider binding required'` 等原因阻断规划。
+- 运行时绑定器的 `assertStepAuthorized` 在执行时进行双重检查，确保绑定仍然有效（纵深防御）。
+
+#### 2.7.3 消费者合约
+
+角色为 `consumer` 的技能声明其消费哪些工件：
+
+```yaml
+runtimeContract:
+  role: consumer
+  targetArtifact: reportArtifact
+  requiredConsumes:
+    - designBasis
+    - normalizedModel
+  optionalConsumes:
+    - postprocessedResult
+    - codeCheckResult
+```
+
+- `requiredConsumes`：该技能执行前必须可用的工件。如果任何必需消费缺失，调度器会先规划生产该工件，或报告阻断原因。
+- `optionalConsumes`：可以增强该技能输出但非强制要求的工件。技能必须能够优雅地处理这些工件的缺失。
+
+#### 2.7.4 设计者合约
+
+角色为 `designer` 的技能通过调度器的设计反馈循环提出设计修改建议。设计者步骤在后处理和规范校核完成后触发（规范 7.3、13.3 节）：
+
+```yaml
+runtimeContract:
+  role: designer
+  consumes:
+    - designBasis
+    - normalizedModel
+  provides:
+    - normalizedModel
+```
+
+- `consumes`：设计者用于形成方案的输入工件（通常是 `designBasis`、`normalizedModel`，以及可选的 `postprocessedResult` / `codeCheckResult`）。
+- `provides`：设计者修改的目标工件（通常是 `normalizedModel`）。
+- 调度器的 `planDesignFeedback()` 方法控制反馈循环：当 `autoDesignIterationPolicy.enabled` 为 true 时，设计者步骤以 `execute` 模式运行；否则以 `propose` 模式运行并创建 `design-proposal` 检查点等待用户确认。
+- 最大迭代次数和验收标准由 `ProjectExecutionPolicy` 中的 `autoDesignIterationPolicy`（不在 skill manifest 中）控制。
+
+#### 2.7.5 示例
+
+分析技能的完整 `runtimeContract` 声明：
+
+```yaml
+id: opensees-static
+domain: analysis
+runtimeContract:
+  role: provider
+  providerSlot: analysisProvider
+  consumes:
+    - analysisModel
+  provides:
+    - analysisRaw
+```
+
+报告导出消费者技能：
+
+```yaml
+id: report-export-builtin
+domain: report-export
+runtimeContract:
+  role: consumer
+  targetArtifact: reportArtifact
+  requiredConsumes:
+    - designBasis
+    - normalizedModel
+  optionalConsumes:
+    - postprocessedResult
+    - codeCheckResult
+```
+
 ## 3. 外部 / SkillHub 技能打包与加载
 
 ### 3.1 包元数据

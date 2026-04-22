@@ -1,10 +1,13 @@
 import type {
+  BucklingMode,
   VisualizationCase,
   VisualizationElement,
   VisualizationElementResults,
+  VisualizationExtensionMap,
   VisualizationLoad,
   VisualizationNode,
   VisualizationNodeResults,
+  VisualizationPlane,
   VisualizationSource,
   VisualizationSnapshot,
   VisualizationViewMode,
@@ -112,14 +115,8 @@ function vectorMagnitude(values: Array<number | null | undefined>) {
   return Math.sqrt(filtered.reduce((sum, value) => sum + value ** 2, 0))
 }
 
-function hasSignificantComponent(entries: Array<Record<string, unknown> | null>, key: string, threshold = 1e-12) {
-  return entries.some((entry) => {
-    if (!entry) {
-      return false
-    }
-    const value = asNumber(entry[key])
-    return value !== null && Math.abs(value) > threshold
-  })
+function getAxisSpread(nodes: VisualizationNode[], axis: 'x' | 'y' | 'z') {
+  return new Set(nodes.map((node) => node.position[axis].toFixed(6))).size
 }
 
 function compactNumberRecord<T extends string>(entries: Array<[T, number | null]>) {
@@ -374,42 +371,49 @@ function getLoads(model: Record<string, unknown> | null): VisualizationLoad[] {
   return loads
 }
 
-function deriveDimension(nodes: VisualizationNode[], displacements: Record<string, unknown> | null) {
-  const ySpread = new Set(nodes.map((node) => node.position.y.toFixed(6))).size
-  const zSpread = new Set(nodes.map((node) => node.position.z.toFixed(6))).size
-  const displacementEntries = Object.values(displacements || {}).map((value) => asRecord(value))
-  const hasUy = hasSignificantComponent(displacementEntries, 'uy')
-  const hasUz = hasSignificantComponent(displacementEntries, 'uz')
+function deriveCoordinateSemantics(model: Record<string, unknown> | null): { dimension: 2 | 3; plane?: VisualizationPlane; semantics: string } | null {
+  if (!model || typeof model !== 'object') return null
+  const metadata = model.metadata
+  if (!metadata || typeof metadata !== 'object') return null
+  const meta = metadata as Record<string, unknown>
+  if (meta.coordinateSemantics === 'global-z-up') {
+    return {
+      dimension: meta.frameDimension === '3d' ? 3 : 2,
+      plane: meta.frameDimension === '3d' ? ('xy' as VisualizationPlane) : ('xz' as VisualizationPlane),
+      semantics: 'global-z-up',
+    }
+  }
+  return null
+}
 
-  if ((ySpread > 1 && zSpread > 1) || (hasUy && hasUz)) {
+function deriveDimension(nodes: VisualizationNode[]) {
+  const ySpread = getAxisSpread(nodes, 'y')
+  const zSpread = getAxisSpread(nodes, 'z')
+
+  if (ySpread > 1 && zSpread > 1) {
     return 3 as const
   }
   return 2 as const
 }
 
-function derivePlane(
-  nodes: VisualizationNode[],
-  displacements: Record<string, unknown> | null,
-  loads: VisualizationLoad[]
-) {
-  const zSpread = new Set(nodes.map((node) => node.position.z.toFixed(6))).size
-  const ySpread = new Set(nodes.map((node) => node.position.y.toFixed(6))).size
-  const displacementEntries = Object.values(displacements || {}).map((value) => asRecord(value))
-  const hasUz = hasSignificantComponent(displacementEntries, 'uz')
-  const hasRy = hasSignificantComponent(displacementEntries, 'ry')
-  const hasUyLoad = loads.some((load) => Math.abs(load.vector.y) > 1e-12)
-  const hasUzLoad = loads.some((load) => Math.abs(load.vector.z) > 1e-12)
-
-  if (zSpread > 1 || hasUz || hasRy || hasUzLoad) {
-    return 'xz' as const
-  }
-  if (ySpread > 1 || hasUyLoad) {
+function derivePlane(nodes: VisualizationNode[], dimension: 2 | 3) {
+  if (dimension === 3) {
     return 'xy' as const
   }
-  return 'xy' as const
+
+  const ySpread = getAxisSpread(nodes, 'y')
+  const zSpread = getAxisSpread(nodes, 'z')
+
+  if (zSpread > 1) {
+    return 'xz' as const
+  }
+  if (ySpread > 1) {
+    return 'xy' as const
+  }
+  return 'xz' as const
 }
 
-function buildAvailableViews(cases: VisualizationCase[], source: VisualizationSource): VisualizationViewMode[] {
+function buildAvailableViews(cases: VisualizationCase[], source: VisualizationSource, hasUtilization = false, hasBuckling = false): VisualizationViewMode[] {
   if (source === 'model') {
     return ['model']
   }
@@ -430,6 +434,8 @@ function buildAvailableViews(cases: VisualizationCase[], source: VisualizationSo
     ...(hasDisplacements ? (['deformed'] as const) : []),
     ...(hasForces ? (['forces'] as const) : []),
     ...(hasReactions ? (['reactions'] as const) : []),
+    ...(hasUtilization ? (['utilization'] as const) : []),
+    ...(hasBuckling ? (['buckling'] as const) : []),
   ]
 }
 
@@ -481,12 +487,55 @@ function deriveUnits(model: Record<string, unknown> | null, analysis: Record<str
   }
 }
 
+function deriveMemberUtilizationMap(
+  data: Record<string, unknown> | null,
+  providedMap?: Record<string, number> | null
+) {
+  if (providedMap && Object.keys(providedMap).length > 0) {
+    return providedMap
+  }
+
+  const steelCheck = asRecord(data?.steelCheck)
+  const codeCheck = asRecord(data?.codeCheck)
+  const nested = asRecord(steelCheck?.memberUtilization) || asRecord(codeCheck?.memberUtilization)
+  if (!nested) {
+    return null
+  }
+
+  return Object.fromEntries(
+    Object.entries(nested)
+      .map(([elementId, value]) => [elementId, asNumber(value)])
+      .filter((entry): entry is [string, number] => entry[1] !== null)
+  )
+}
+
+function deriveBucklingModes(
+  data: Record<string, unknown> | null,
+  providedModes?: BucklingMode[] | null
+) {
+  if (Array.isArray(providedModes) && providedModes.length > 0) {
+    return providedModes
+  }
+
+  const buckling = asRecord(data?.buckling)
+  const modes = Array.isArray(buckling?.modes) ? buckling.modes : []
+  const normalized = modes.filter((entry): entry is BucklingMode => {
+    const record = asRecord(entry)
+    return Boolean(record && typeof record.lambda === 'number' && asRecord(record.modeShape))
+  })
+  return normalized.length > 0 ? normalized : null
+}
+
 export function buildVisualizationSnapshot(params: {
   title: string
   model: Record<string, unknown> | null
   analysis?: Record<string, unknown> | null
   mode?: 'model-only' | 'analysis-result'
   statusMessage?: string
+  /** memberUtilizationMap from backend VisualizationHints: elementId → ratio (0~1+) */
+  memberUtilizationMap?: Record<string, number> | null
+  /** bucklingModes from backend VisualizationHints, sorted by λ ascending */
+  bucklingModes?: BucklingMode[] | null
 }): VisualizationSnapshot | null {
   const model = params.model
   if (!model) {
@@ -604,10 +653,57 @@ export function buildVisualizationSnapshot(params: {
     : [buildCase('model', 'Model', 'case', null, null, null, null)]
 
   const unsupportedElementTypes = Array.from(
-    new Set(elements.map((element) => element.type).filter((type) => !['beam', 'truss'].includes(type)))
+    new Set(elements.map((element) => element.type).filter((type) => !['beam', 'truss', 'column', 'brace'].includes(type)))
   )
-  const dimension = deriveDimension(nodes, baseDisplacements)
-  const plane = derivePlane(nodes, baseDisplacements, loads)
+  const semantics = deriveCoordinateSemantics(model)
+  const dimension = semantics?.dimension ?? deriveDimension(nodes)
+  const plane = semantics?.plane ?? derivePlane(nodes, dimension)
+  const utilizationMap = deriveMemberUtilizationMap(data, params.memberUtilizationMap)
+  const bucklingModes = deriveBucklingModes(data, params.bucklingModes)
+
+  // Inject steel member utilization ratios into all cases' elementResults
+  if (utilizationMap && Object.keys(utilizationMap).length > 0) {
+    cases.forEach((vizCase) => {
+      Object.entries(utilizationMap).forEach(([elementId, ratio]) => {
+        if (typeof ratio === 'number' && Number.isFinite(ratio)) {
+          vizCase.elementResults[elementId] = {
+            ...(vizCase.elementResults[elementId] || {}),
+            utilization: ratio,
+          }
+        }
+      })
+    })
+  }
+
+  // Build availableViews — include 'utilization' when any element has the field
+  const hasUtilization = cases.some((item) =>
+    Object.values(item.elementResults).some((result) => typeof result.utilization === 'number')
+  )
+  const hasBuckling = Array.isArray(bucklingModes) && bucklingModes.length > 0
+  const extensions: VisualizationExtensionMap = {
+    ...(hasUtilization && utilizationMap
+      ? {
+          'builtin.utilization': {
+            id: 'builtin.utilization',
+            available: true,
+            data: {
+              memberUtilizationMap: utilizationMap,
+            },
+          },
+        }
+      : {}),
+    ...(hasBuckling && bucklingModes
+      ? {
+          'builtin.buckling': {
+            id: 'builtin.buckling',
+            available: true,
+            data: {
+              bucklingModes,
+            },
+          },
+        }
+      : {}),
+  }
 
   return normalizeVisualizationSnapshot({
     version: 1,
@@ -615,8 +711,9 @@ export function buildVisualizationSnapshot(params: {
     source,
     dimension,
     plane,
+    coordinateSemantics: semantics?.semantics,
     analysisType: typeof analysis?.analysis_type === 'string' ? analysis.analysis_type : undefined,
-    availableViews: buildAvailableViews(cases, source),
+    availableViews: buildAvailableViews(cases, source, hasUtilization, hasBuckling),
     defaultCaseId: cases.find((item) => item.kind === 'result')?.id || cases[0]?.id || (source === 'model' ? 'model' : 'result'),
     unitSystem: units.unitSystem,
     lengthUnit: units.lengthUnit,
@@ -634,5 +731,7 @@ export function buildVisualizationSnapshot(params: {
     cases,
     summary: asRecord(data?.summary) || undefined,
     statusMessage: params.statusMessage,
+    extensions: Object.keys(extensions).length > 0 ? extensions : undefined,
+    bucklingModes: hasBuckling ? bucklingModes || undefined : undefined,
   })
 }

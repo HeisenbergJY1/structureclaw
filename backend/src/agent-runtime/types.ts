@@ -15,6 +15,7 @@ export type AgentToolSource = 'builtin' | 'external';
 export interface DraftFloorLoad {
   story: number;
   verticalKN?: number;
+  liveLoadKN?: number;
   lateralXKN?: number;
   lateralYKN?: number;
 }
@@ -52,6 +53,7 @@ export interface DraftState {
   structuralTypeKey?: StructuralTypeKey;
   supportLevel?: StructuralTypeSupportLevel;
   supportNote?: string;
+  coordinateSemantics?: string;
   skillState?: Record<string, unknown>;
   lengthM?: number;
   spanLengthM?: number;
@@ -82,6 +84,7 @@ export interface DraftExtraction {
   structuralTypeKey?: StructuralTypeKey;
   supportLevel?: StructuralTypeSupportLevel;
   supportNote?: string;
+  coordinateSemantics?: string;
   skillState?: Record<string, unknown>;
   lengthM?: number;
   spanLengthM?: number;
@@ -210,6 +213,7 @@ export interface SkillManifest extends AgentSkillMetadata {
   materialFamilies?: MaterialFamily[];
   priority: number;
   compatibility: SkillCompatibility;
+  runtimeContract?: SkillRuntimeContract;
 }
 
 export interface ToolManifest {
@@ -219,7 +223,7 @@ export interface ToolManifest {
   tier?: 'foundation' | 'domain' | 'extension';
   displayName: LocalizedText;
   description: LocalizedText;
-  category?: 'modeling' | 'analysis' | 'code-check' | 'report' | 'utility';
+  category?: 'modeling' | 'analysis' | 'code-check' | 'report' | 'utility' | 'drawing';
   providedBySkillId?: string;
   requiresSkills?: string[];
   requiresTools?: string[];
@@ -263,7 +267,7 @@ export interface SkillReportNarrativeInput {
   keyMetrics: Record<string, unknown>;
   clauseTraceability: Array<Record<string, unknown>>;
   controllingCases: Record<string, unknown>;
-  visualizationHints: Record<string, unknown>;
+  visualizationHints: VisualizationHints;
   locale: AppLocale;
 }
 
@@ -303,4 +307,380 @@ export interface AgentSkillExecutorInput {
   locale: AppLocale;
   existingState?: DraftState;
   selectedSkill: AgentSkillPlugin;
+  signal?: AbortSignal;
+}
+
+// ---------------------------------------------------------------------------
+// Visualization hint types (used by extractVisualizationHints in entry.ts)
+// ---------------------------------------------------------------------------
+
+/** 6-DOF force/moment vector at a connection node. */
+export interface ForceVector6 {
+  Fx: number;
+  Fy: number;
+  Fz: number;
+  Mx: number;
+  My: number;
+  Mz: number;
+}
+
+/** A single linear buckling mode (eigenvalue + normalised mode shape). */
+export interface BucklingMode {
+  /** Buckling factor λ (critical load multiplier). */
+  lambda: number;
+  /** Normalised displacement vector per node: nodeId → [dx, dy, dz]. */
+  modeShape: Record<string, [number, number, number]>;
+}
+
+/**
+ * Structured visualization hints extracted from analysis results.
+ * Consumed by the frontend Three.js renderer and Plotly chart component.
+ */
+export interface VisualizationHints {
+  // ── existing envelope fields ─────────────────────────────────────────────
+  /** Name of the governing load case (envelope). */
+  controlCase?: string | null;
+  /** Maximum nodal displacement in the governing case (mm). */
+  controlNodeDisplacement?: number | null;
+  /** Maximum element moment in the governing case (kN·m). */
+  controlElementMoment?: number | null;
+  /** Whether envelope data is present in the analysis result. */
+  hasEnvelope?: boolean;
+
+  // ── steel member stress / utilization ────────────────────────────────────
+  /**
+   * Per-member utilization ratio map.
+   * Key: member/element ID (string).
+   * Value: utilization ratio (0 = 0%, 1.0 = 100%, >1 = overstressed).
+   */
+  memberUtilizationMap?: Record<string, number> | null;
+
+  // ── steel connection detail ───────────────────────────────────────────────
+  /**
+   * Per-node connection force demand map.
+   * Key: node ID (string).
+   * Value: 6-DOF force vector (kN / kN·m).
+   */
+  connectionForceMap?: Record<string, ForceVector6> | null;
+
+  // ── buckling modes ────────────────────────────────────────────────────────
+  /**
+   * Linear buckling (eigenvalue) mode shapes, ordered by λ ascending.
+   * Only present when the analysis solver outputs buckling eigenvalues.
+   */
+  bucklingModes?: BucklingMode[] | null;
+
+  // ── plotly chart spec ─────────────────────────────────────────────────────
+  /**
+   * Plotly Figure JSON configuration.
+   * Populated by the agent when interactive chart output is requested.
+   * Schema: https://plotly.com/javascript/reference/
+   */
+  plotlyChartSpec?: unknown | null;
+}
+
+// ---------------------------------------------------------------------------
+// Scheduler runtime contract types
+// ---------------------------------------------------------------------------
+
+// --- Scheduler Tool ---
+
+export type SchedulerTool =
+  | 'draft_model'
+  | 'update_model'
+  | 'convert_model'
+  | 'validate_model'
+  | 'synthesize_design'
+  | 'run_analysis'
+  | 'postprocess_result'
+  | 'run_code_check'
+  | 'generate_drawing'
+  | 'generate_report'
+  | 'enrich_model';
+
+// --- Skill Role ---
+
+export type SkillRole =
+  | 'entry'
+  | 'enricher'
+  | 'designer'
+  | 'validator'
+  | 'provider'
+  | 'transformer'
+  | 'consumer'
+  | 'assistant';
+
+// --- Artifact kinds ---
+
+export type ArtifactKind =
+  | 'draftState'
+  | 'designBasis'
+  | 'normalizedModel'
+  | 'analysisModel'
+  | 'analysisRaw'
+  | 'postprocessedResult'
+  | 'codeCheckResult'
+  | 'drawingArtifact'
+  | 'reportArtifact';
+
+export type ProjectArtifactKind = Exclude<ArtifactKind, 'draftState'>;
+
+// --- Artifact references and envelope ---
+
+export interface ArtifactRef {
+  kind: ArtifactKind;
+  artifactId: string;
+  revision: number;
+}
+
+export type ArtifactScope = 'session' | 'project' | 'deliverable';
+export type ArtifactStatus = 'draft' | 'ready' | 'stale' | 'blocked' | 'failed';
+
+export interface ArtifactProvenance {
+  toolId?: string;
+  toolVersion?: string;
+  skillContractVersion?: string;
+  warnings?: string[];
+}
+
+export interface ArtifactEnvelope<T = unknown> {
+  artifactId: string;
+  kind: ArtifactKind;
+  scope: ArtifactScope;
+  status: ArtifactStatus;
+  revision: number;
+  producerSkillId?: string;
+  providerSkillId?: string;
+  runId?: string;
+  createdAt: number;
+  updatedAt: number;
+  basedOn: ArtifactRef[];
+  dependencyFingerprint: string;
+  schemaVersion: string;
+  provenance: ArtifactProvenance;
+  payload: T;
+}
+
+// --- Patch record (type only; reducer logic is follow-up) ---
+
+export type PatchKind = 'modelPatch' | 'designPatch';
+export type PatchStatus = 'proposed' | 'accepted' | 'rejected' | 'conflicted';
+export type PatchMergeStrategy = 'merge' | 'replace' | 'append';
+
+export interface ModelPatchRecord {
+  patchId: string;
+  patchKind: PatchKind;
+  producerSkillId: string;
+  baseModelRevision: number;
+  basedOn: ArtifactRef[];
+  status: PatchStatus;
+  acceptedBy?: 'user' | 'policy' | 'system';
+  priority: number;
+  mergeStrategy?: PatchMergeStrategy;
+  conflicts?: Array<{ path: string; withPatchId: string }>;
+  createdAt: number;
+  reason: string;
+  payload: Record<string, unknown>;
+}
+
+// --- Project execution policy ---
+
+export interface AutoDesignIterationPolicy {
+  enabled: boolean;
+  maxIterations: number;
+  acceptanceCriteria: string[];
+  allowedDomains: string[];
+}
+
+export interface ProjectExecutionPolicy {
+  analysisType?: AgentAnalysisType;
+  designCode?: string;
+  analysisProviderPreference?: string;
+  codeCheckProviderPreference?: string;
+  allowAsync?: boolean;
+  autoDesignIterationPolicy?: AutoDesignIterationPolicy;
+  requireApprovalBeforeExecution?: boolean;
+  deliverableProfiles?: {
+    drawing?: string;
+    report?: string;
+  };
+}
+
+export interface RequestExecutionOverrides {
+  forceRecompute?: boolean;
+  analysisType?: AgentAnalysisType;
+  designCode?: string;
+  allowAsync?: boolean;
+  autoDesignIterationEnabled?: boolean;
+  deliverableProfiles?: {
+    drawing?: string;
+    report?: string;
+  };
+}
+
+// --- Provider binding ---
+
+export interface ProviderBindingState {
+  analysisProviderSkillId?: string;
+  codeCheckProviderSkillId?: string;
+  validationSkillId?: string;
+  postprocessSkillId?: string;
+  reportSkillId?: string;
+  drawingSkillId?: string;
+}
+
+// --- Runtime contract (all role variants) ---
+
+export interface ProviderRuntimeContract {
+  role: 'provider';
+  providerSlot: 'analysisProvider' | 'codeCheckProvider';
+  selectionPolicy?: 'optional' | 'explicit_required';
+  cardinality?: 'singleton';
+  consumes?: ArtifactKind[];
+  provides?: ArtifactKind[];
+  runtimeAdapter?: string;
+  supportedAnalysisTypes?: string[];
+  supportedModelFamilies?: string[];
+}
+
+export interface DesignerRuntimeContract {
+  role: 'designer';
+  selectionPolicy?: 'optional' | 'explicit_required';
+  consumes?: ArtifactKind[];
+  providesPatches?: string[];
+  requiresUserAcceptance?: boolean;
+  autoIteration?: {
+    supported: boolean;
+    defaultEnabled: boolean;
+  };
+}
+
+export interface ConsumerRuntimeContract {
+  role: 'consumer';
+  targetArtifact?: ArtifactKind;
+  deliverableProfileKey?: string;
+  /** Specific artifacts that must be present before the consumer can execute. */
+  requiredConsumes?: ArtifactKind[];
+  /** Artifacts that improve output quality but are not strictly required. */
+  optionalConsumes?: ArtifactKind[];
+  /**
+   * Derived: union of requiredConsumes + optionalConsumes.
+   * Do not set independently — this is computed from the above two fields.
+   */
+  consumes?: ArtifactKind[];
+  provides?: ArtifactKind[];
+}
+
+export interface TransformerRuntimeContract {
+  role: 'transformer';
+  consumes?: ArtifactKind[];
+  provides?: ArtifactKind[];
+}
+
+export interface BaseRuntimeContract {
+  role: 'entry' | 'enricher' | 'validator' | 'assistant';
+  selectionPolicy?: 'optional' | 'explicit_required';
+  consumes?: ArtifactKind[];
+  provides?: ArtifactKind[];
+}
+
+export type SkillRuntimeContract =
+  | ProviderRuntimeContract
+  | DesignerRuntimeContract
+  | ConsumerRuntimeContract
+  | TransformerRuntimeContract
+  | BaseRuntimeContract;
+
+// --- Interaction checkpoint ---
+
+export type CheckpointKind = 'clarification' | 'design-proposal' | 'approval' | 'blocked';
+
+export interface InteractionCheckpoint {
+  checkpointId: string;
+  kind: CheckpointKind;
+  targetArtifact?: ArtifactKind;
+  patchId?: string;
+  summary: string;
+  createdAt: number;
+}
+
+// --- Pipeline state ---
+
+export interface ProjectArtifactState {
+  designBasis?: ArtifactEnvelope;
+  normalizedModel?: ArtifactEnvelope;
+  analysisModel?: ArtifactEnvelope;
+  analysisRaw?: ArtifactEnvelope;
+  postprocessedResult?: ArtifactEnvelope;
+  codeCheckResult?: ArtifactEnvelope;
+  drawingArtifact?: ArtifactEnvelope;
+  reportArtifact?: ArtifactEnvelope;
+}
+
+export interface ProjectPipelineState {
+  policy: ProjectExecutionPolicy;
+  bindings: ProviderBindingState;
+  artifacts: ProjectArtifactState;
+  patches?: ModelPatchRecord[];
+  updatedAt: number;
+}
+
+// --- Session working state (spec section 14) ---
+
+export interface SessionWorkingState {
+  selectedSkillIds: string[];
+  locale: import('../services/locale.js').AppLocale;
+  draftState?: ArtifactEnvelope;
+  checkpoint?: InteractionCheckpoint;
+  updatedAt: number;
+}
+
+// --- Run record ---
+
+export type RunStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'blocked' | 'canceled';
+
+export interface RunRecord {
+  runId: string;
+  targetArtifact: ArtifactKind;
+  toolId: string;
+  providerSkillId?: string;
+  status: RunStatus;
+  inputFingerprint: string;
+  startedAt?: number;
+  finishedAt?: number;
+  diagnostics?: string[];
+}
+
+// --- Scheduler types ---
+
+export interface SchedulerStep {
+  stepId: string;
+  role: SkillRole;
+  tool: SchedulerTool;
+  skillId?: string;
+  consumes: ArtifactRef[];
+  provides?: ArtifactKind;
+  mode: 'reuse' | 'execute' | 'transform' | 'queue-run' | 'ask-user' | 'propose' | 'block' | 'approval';
+  reason: string;
+}
+
+export interface SchedulerInput {
+  message: string;
+  locale: AppLocale;
+  selectedSkillIds: string[];
+  bindings: ProviderBindingState;
+  projectPolicy: ProjectExecutionPolicy;
+  targetArtifact: ArtifactKind | 'chatReply';
+  sessionArtifacts: {
+    draftState?: ArtifactEnvelope;
+  };
+  projectArtifacts: Partial<Record<ProjectArtifactKind, ArtifactEnvelope>>;
+  requestOverrides?: RequestExecutionOverrides;
+  structuralSkillId?: string;
+}
+
+export interface SchedulerPlan {
+  targetArtifact: ArtifactKind | 'chatReply';
+  requiredSteps: SchedulerStep[];
+  blockedReason?: string;
 }

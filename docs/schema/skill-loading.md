@@ -120,6 +120,113 @@ The current `/api/v1/agent/capability-matrix` also exposes `runtimeStatus` for e
 
 Therefore, engine availability is a runtime gate that directly affects downstream skill activation and execution eligibility. A skill may be correctly loaded in the taxonomy, but still be filtered out for execution if its required engine is currently unavailable or incompatible.
 
+### 2.7 Runtime Contract in skill.yaml
+
+The `runtimeContract` field in `skill.yaml` declares how a skill participates in the target scheduler's artifact graph. It replaces implicit activation with explicit provider and consumer declarations.
+
+#### 2.7.1 SkillRole Variants
+
+Every skill declares its role via `runtimeContract.role`. The eight defined roles are:
+
+| Role | Description |
+|------|-------------|
+| `entry` | The first skill in the pipeline. Receives raw user input and produces the initial artifact (e.g., `structure-type` producing a draft model). |
+| `enricher` | Adds information to an existing artifact without changing its type (e.g., adding load/boundary conditions to a draft). |
+| `validator` | Checks an artifact for correctness and enriches the source artifact (e.g., validation adds quality metadata to `normalizedModel`; there is no separate `validationResult` artifact kind). |
+| `assistant` | Provides guidance or explanation without producing or modifying artifacts. |
+| `provider` | Produces an artifact that other skills consume. Declares a `providerSlot` for the scheduler to bind. |
+| `consumer` | Consumes artifacts produced by other skills. Declares `requiredConsumes` and/or `optionalConsumes`. |
+| `designer` | Proposes design modifications to an artifact. Uses `providesPatches` and `autoIteration` to drive the design feedback loop. |
+| `transformer` | Converts one artifact type into another (e.g., draft model to analysis input). |
+
+#### 2.7.2 Provider Slot and Selection Policy
+
+Skills with role `provider` declare a `providerSlot` in their runtime contract:
+
+```yaml
+runtimeContract:
+  role: provider
+  providerSlot: analysisProvider   # or codeCheckProvider
+  consumes:
+    - analysisModel
+  provides:
+    - analysisRaw
+```
+
+- `providerSlot`: a stable identifier that the scheduler uses to bind this provider to an artifact in the graph. The two defined slots are `analysisProvider` (for `analysisRaw`) and `codeCheckProvider` (for `codeCheckResult`).
+- The scheduler's `planDependencyPath` blocks with a reason like `'analysisProvider binding required'` when a provider slot is not bound in the pipeline state's `bindings`.
+- The runtime binder's `assertStepAuthorized` performs a defense-in-depth check that the same binding exists at execution time.
+
+#### 2.7.3 Consumer Contracts
+
+Skills with role `consumer` declare which artifacts they consume:
+
+```yaml
+runtimeContract:
+  role: consumer
+  targetArtifact: reportArtifact
+  requiredConsumes:
+    - designBasis
+    - normalizedModel
+  optionalConsumes:
+    - postprocessedResult
+    - codeCheckResult
+```
+
+- `requiredConsumes`: artifacts that must be available before this skill can execute. If any required consume is missing, the scheduler will plan to produce it first or report a blocked reason.
+- `optionalConsumes`: artifacts that enhance this skill's output but are not mandatory. The skill must handle their absence gracefully.
+
+#### 2.7.4 Designer Contracts
+
+Skills with role `designer` propose design modifications through the scheduler's design feedback loop. The designer step is triggered after postprocess and code-check complete (spec sections 7.3, 13.3):
+
+```yaml
+runtimeContract:
+  role: designer
+  consumes:
+    - designBasis
+    - normalizedModel
+  provides:
+    - normalizedModel
+```
+
+- `consumes`: the artifacts the designer reads to formulate a proposal (typically `designBasis`, `normalizedModel`, and optionally `postprocessedResult` / `codeCheckResult`).
+- `provides`: the artifact the designer modifies (typically `normalizedModel`).
+- The scheduler's `planDesignFeedback()` method controls the feedback loop: when `autoDesignIterationPolicy.enabled` is true, the designer step runs in `execute` mode; otherwise it runs in `propose` mode and creates a `design-proposal` checkpoint for user confirmation.
+- The `autoDesignIterationPolicy` in `ProjectExecutionPolicy` (not in the skill manifest) controls max iterations and acceptance criteria.
+
+#### 2.7.5 Example
+
+A complete `runtimeContract` in `skill.yaml` for an analysis skill:
+
+```yaml
+id: opensees-static
+domain: analysis
+runtimeContract:
+  role: provider
+  providerSlot: analysisProvider
+  consumes:
+    - analysisModel
+  provides:
+    - analysisRaw
+```
+
+A report-export consumer skill:
+
+```yaml
+id: report-export-builtin
+domain: report-export
+runtimeContract:
+  role: consumer
+  targetArtifact: reportArtifact
+  requiredConsumes:
+    - designBasis
+    - normalizedModel
+  optionalConsumes:
+    - postprocessedResult
+    - codeCheckResult
+```
+
 ## 3. External / SkillHub Skill Packaging and Loading
 
 ### 3.1 Package Metadata

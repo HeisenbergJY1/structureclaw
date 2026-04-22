@@ -12,7 +12,81 @@ const materialFamilySchema = z.enum(['steel', 'concrete', 'composite', 'timber',
 const toolSourceSchema = z.enum(['builtin', 'external']);
 const skillSourceSchema = z.enum(['builtin', 'external']);
 const toolTierSchema = z.enum(['foundation', 'domain', 'extension']);
-const toolCategorySchema = z.enum(['modeling', 'analysis', 'code-check', 'report', 'utility']);
+const toolCategorySchema = z.enum(['modeling', 'analysis', 'code-check', 'report', 'utility', 'drawing']);
+
+// --- Runtime contract schemas ---
+
+const artifactKindSchema = z.enum([
+  'draftState',
+  'designBasis',
+  'normalizedModel',
+  'analysisModel',
+  'analysisRaw',
+  'postprocessedResult',
+  'codeCheckResult',
+  'drawingArtifact',
+  'reportArtifact',
+]);
+
+const baseRuntimeContractShape = {
+  selectionPolicy: z.enum(['optional', 'explicit_required']).optional(),
+  consumes: z.array(artifactKindSchema).default([]),
+  provides: z.array(artifactKindSchema).default([]),
+};
+
+const runtimeContractSchema = z.discriminatedUnion('role', [
+  z.object({
+    role: z.literal('provider'),
+    ...baseRuntimeContractShape,
+    providerSlot: z.enum(['analysisProvider', 'codeCheckProvider']),
+    cardinality: z.enum(['singleton']).optional(),
+    runtimeAdapter: z.string().optional(),
+    supportedAnalysisTypes: z.array(z.string()).optional(),
+    supportedModelFamilies: z.array(z.string()).optional(),
+  }),
+  z.object({
+    role: z.literal('designer'),
+    selectionPolicy: z.enum(['optional', 'explicit_required']).optional(),
+    consumes: z.array(artifactKindSchema).default([]),
+    // NOTE: no `provides` — designers produce patches via providesPatches, not artifacts
+    providesPatches: z.array(z.string()).optional(),
+    requiresUserAcceptance: z.boolean().optional(),
+    autoIteration: z.object({
+      supported: z.boolean(),
+      defaultEnabled: z.boolean(),
+    }).optional(),
+  }),
+  z.object({
+    role: z.literal('consumer'),
+    targetArtifact: artifactKindSchema.optional(),
+    deliverableProfileKey: z.string().optional(),
+    requiredConsumes: z.array(artifactKindSchema).default([]),
+    optionalConsumes: z.array(artifactKindSchema).default([]),
+    // No standalone `consumes` — derived from requiredConsumes ∪ optionalConsumes at runtime
+    provides: z.array(artifactKindSchema).default([]),
+  }),
+  z.object({
+    role: z.literal('transformer'),
+    ...baseRuntimeContractShape,
+  }),
+  z.object({
+    role: z.literal('entry'),
+    ...baseRuntimeContractShape,
+  }),
+  z.object({
+    role: z.literal('enricher'),
+    ...baseRuntimeContractShape,
+    priority: z.number().int().optional(),
+  }),
+  z.object({
+    role: z.literal('validator'),
+    ...baseRuntimeContractShape,
+  }),
+  z.object({
+    role: z.literal('assistant'),
+    ...baseRuntimeContractShape,
+  }),
+]).optional();
 
 export const skillManifestFileSchema = z.object({
   id: z.string().trim().min(1),
@@ -55,6 +129,7 @@ export const skillManifestFileSchema = z.object({
   materialFamilies: z.array(materialFamilySchema).default([]),
   toolHints: z.record(z.unknown()).default({}),
   aliases: z.array(z.string().trim().min(1)).default([]),
+  runtimeContract: runtimeContractSchema,
 });
 
 export const toolManifestFileSchema = z.object({

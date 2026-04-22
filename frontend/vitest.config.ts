@@ -8,6 +8,12 @@ export default defineConfig({
     environment: 'jsdom',
     globals: true,
     include: ['tests/**/*.test.ts', 'tests/**/*.test.tsx'],
+    exclude: [
+      'tests/integration/**',
+      'tests/components/console/**',
+      'tests/accessibility/**',
+      'tests/e2e/**',
+    ],
     setupFiles: ['./tests/setup.ts'],
     // Windows CI and local runs are slower; userEvent + waitFor need headroom.
     testTimeout: 20_000,

@@ -3,6 +3,7 @@
 Thumbs.db
 .vscode/
 .idea/
+.playwright-mcp/
 .claude/
 
 # Environment and local runtime config
@@ -43,6 +44,10 @@ backend/uploads/*
 # AI Editor & Agent configs
 .cursor/
 .kiro/
+.codex
+
+# Local test artifacts
+tests/.artifacts/
 
 # Personal agent planning artifacts
 docs/superpowers/

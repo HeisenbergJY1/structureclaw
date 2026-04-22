@@ -9,6 +9,7 @@ const rootEnvPath = path.resolve(__dirname, '../../../.env');
 const defaultSqliteDatabasePath = path.resolve(__dirname, '../../../.runtime/data/structureclaw.db');
 const defaultSqliteDatabaseUrl = `file:${defaultSqliteDatabasePath}`;
 const defaultUploadDir = path.resolve(__dirname, '../../../.runtime');
+const defaultLlmSettingsPath = path.resolve(__dirname, '../../../.runtime/llm-settings.json');
 
 function resolveReportsDir(rawValue: string | undefined): string {
   const trimmed = rawValue?.trim();
@@ -61,12 +62,12 @@ export const config = {
   llmApiKey,
   llmModel,
   llmBaseUrl,
-  llmTimeoutMs: parseInt(process.env.LLM_TIMEOUT_MS || '90000', 10),
+  llmTimeoutMs: parseInt(process.env.LLM_TIMEOUT_MS || '180000', 10),
   llmMaxRetries: parseInt(process.env.LLM_MAX_RETRIES || '0', 10),
 
   // 分析执行配置
   analysisPythonBin: process.env.ANALYSIS_PYTHON_BIN || defaultAnalysisPythonBin,
-  analysisPythonTimeoutMs: parseInt(process.env.ANALYSIS_PYTHON_TIMEOUT_MS || '300000', 10),
+  analysisPythonTimeoutMs: parseInt(process.env.ANALYSIS_PYTHON_TIMEOUT_MS || '600000', 10),
   analysisEngineManifestPath,
 
   // CORS
@@ -79,10 +80,13 @@ export const config = {
 
   // 日志级别
   logLevel: process.env.LOG_LEVEL || 'info',
+  /** 应用日志文件路径；默认 <repo>/.runtime/logs/app.log */
+  logFile: process.env.LOG_FILE || '',
 
-  // LLM 调用日志
-  llmLogEnabled: process.env.LLM_LOG_ENABLED !== 'false',
+  // LLM 调用日志（默认关闭，设置 LLM_LOG_ENABLED=true 开启；日志含完整 prompt/response，注意隐私）
+  llmLogEnabled: process.env.LLM_LOG_ENABLED === 'true',
   llmLogDir: process.env.LLM_LOG_DIR || '',
+  llmSettingsPath: process.env.LLM_SETTINGS_PATH || defaultLlmSettingsPath,
 };
 
 export type Config = typeof config;

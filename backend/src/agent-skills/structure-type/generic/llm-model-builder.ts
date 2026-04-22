@@ -1,6 +1,7 @@
 import type { ChatOpenAI } from '@langchain/openai';
 import type { AppLocale } from '../../../services/locale.js';
 import type { DraftState } from '../../../agent-runtime/types.js';
+import { STRUCTURAL_COORDINATE_SEMANTICS } from '../../../agent-runtime/coordinate-semantics.js';
 import { logger } from '../../../utils/logger.js';
 import { buildGenericModelPrompt, buildRetrySuffix } from './llm-model-prompt.js';
 
@@ -10,6 +11,7 @@ export async function tryBuildGenericModelWithLlm(
   state: DraftState,
   locale: AppLocale,
   conversationHistory?: string,
+  signal?: AbortSignal,
 ): Promise<Record<string, unknown> | undefined> {
   if (!llm) {
     return undefined;
@@ -31,7 +33,7 @@ export async function tryBuildGenericModelWithLlm(
     }, 'generic llm model attempt started');
 
     try {
-      const aiMessage = await llm.invoke(prompt);
+      const aiMessage = await llm.invoke(prompt, { signal });
       const content = typeof aiMessage.content === 'string'
         ? aiMessage.content
         : JSON.stringify(aiMessage.content);
@@ -58,11 +60,13 @@ export async function tryBuildGenericModelWithLlm(
       }
 
       if (typeof parsed.schema_version !== 'string') {
-        parsed.schema_version = '1.0.0';
+        parsed.schema_version = '2.0.0';
       }
       if (typeof parsed.unit_system !== 'string') {
         parsed.unit_system = 'SI';
       }
+
+      stampCanonicalMetadata(parsed, state);
 
       logger.info({
         attempt: attempt + 1,
@@ -122,4 +126,65 @@ function tryParseJson(content: string): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+function stampCanonicalMetadata(model: Record<string, unknown>, state: DraftState): void {
+  const nextMetadata = (
+    model.metadata && typeof model.metadata === 'object' && !Array.isArray(model.metadata)
+      ? { ...(model.metadata as Record<string, unknown>) }
+      : {}
+  );
+
+  nextMetadata.coordinateSemantics = STRUCTURAL_COORDINATE_SEMANTICS;
+  if (nextMetadata.frameDimension !== '2d' && nextMetadata.frameDimension !== '3d') {
+    nextMetadata.frameDimension = inferFrameDimension(model);
+  }
+  if (
+    (typeof nextMetadata.inferredType !== 'string' || nextMetadata.inferredType.trim().length === 0)
+    && typeof state.inferredType === 'string'
+    && state.inferredType !== 'unknown'
+  ) {
+    nextMetadata.inferredType = state.inferredType;
+  }
+  if (typeof nextMetadata.source !== 'string' || nextMetadata.source.trim().length === 0) {
+    nextMetadata.source = 'generic-llm-draft';
+  }
+
+  model.metadata = nextMetadata;
+}
+
+function inferFrameDimension(model: Record<string, unknown>): '2d' | '3d' {
+  const nodes = Array.isArray(model.nodes) ? model.nodes : [];
+  const yValues = new Set<string>();
+  const zValues = new Set<string>();
+
+  nodes.forEach((node) => {
+    if (!node || typeof node !== 'object' || Array.isArray(node)) {
+      return;
+    }
+    const record = node as Record<string, unknown>;
+    const y = toFiniteNumber(record.y);
+    const z = toFiniteNumber(record.z);
+    if (y !== null) {
+      yValues.add(y.toFixed(6));
+    }
+    if (z !== null) {
+      zValues.add(z.toFixed(6));
+    }
+  });
+
+  return yValues.size > 1 && zValues.size > 1 ? '3d' : '2d';
+}
+
+function toFiniteNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === 'string') {
+    const parsed = Number(value.trim());
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return null;
 }

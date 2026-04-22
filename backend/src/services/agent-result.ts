@@ -56,16 +56,24 @@ export function buildInteractionQuestion(interaction: AgentInteraction, locale: 
   );
 }
 
-export function buildToolInteraction(state: 'completed' | 'blocked', locale: AppLocale): AgentInteraction {
+export function buildToolInteraction(state: import('./agent.js').AgentInteractionState, locale: AppLocale): AgentInteraction {
+  const routeReason = state === 'completed'
+    ? localize(locale, '工具调用已完成。', 'Tool invocation completed.')
+    : state === 'blocked'
+      ? localize(locale, '工具调用已触发，但被下游工具或校验失败阻断。', 'Tool invocation was attempted but blocked by downstream tool or validation failure.')
+      : state === 'collecting'
+        ? localize(locale, '等待用户补充信息。', 'Waiting for user input.')
+        : state === 'confirming'
+          ? localize(locale, '等待用户确认设计方案。', 'Waiting for user to confirm design proposal.')
+          : localize(locale, '任务已排队执行。', 'Task queued for execution.');
+  const nextActions: import('./agent.js').AgentUserDecision[] = state === 'completed' ? [] : ['revise'];
   return {
     state,
     stage: 'report',
     turnId: randomUUID(),
     routeHint: 'prefer_tool',
-    routeReason: state === 'completed'
-      ? localize(locale, '工具调用已完成。', 'Tool invocation completed.')
-      : localize(locale, '工具调用已触发，但被下游工具或校验失败阻断。', 'Tool invocation was attempted but blocked by downstream tool or validation failure.'),
-    nextActions: state === 'completed' ? [] : ['revise'],
+    routeReason,
+    nextActions,
   };
 }
 
@@ -147,6 +155,7 @@ export async function renderSummary(
   locale: AppLocale,
   analysisData?: unknown,
   conversationId?: string,
+  signal?: AbortSignal,
 ): Promise<string> {
   if (!llm) {
     return fallback;
@@ -187,7 +196,8 @@ export async function renderSummary(
       localize(locale, `系统结果：${fallback}`, `System result: ${fallback}`),
     );
     if (hasData) {
-      const dataObj = analysisData as Record<string, unknown>;
+      const rawObj = analysisData as Record<string, unknown>;
+      const dataObj = (rawObj.data && typeof rawObj.data === 'object' && !Array.isArray(rawObj.data) ? rawObj.data : rawObj) as Record<string, unknown>;
       const compact = JSON.stringify({
         analysisMode: dataObj['analysisMode'] ?? null,
         plane: dataObj['plane'] ?? null,
@@ -197,7 +207,7 @@ export async function renderSummary(
       promptParts.push(localize(locale, `分析数据：${compact}`, `Analysis data: ${compact}`));
     }
     const prompt = promptParts.join('\n');
-    const aiMessage = await llm.invoke(prompt);
+    const aiMessage = await llm.invoke(prompt, { signal });
     const content = typeof aiMessage.content === 'string'
       ? aiMessage.content
       : JSON.stringify(aiMessage.content);

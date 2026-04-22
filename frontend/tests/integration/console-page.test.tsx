@@ -3,10 +3,12 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import ConsolePage from '../../src/app/(console)/console/page'
 import type { VisualizationSnapshot } from '../../src/components/visualization'
+import { API_BASE } from '@/lib/api-base'
 import { CAPABILITY_PREFERENCE_STORAGE_KEY } from '@/lib/capability-preference'
 import { clearLocaleCookie, LOCALE_STORAGE_KEY, normalizeLocale } from '@/lib/locale-preference'
 import { AppStoreProvider } from '@/lib/stores/context'
 import type { AppLocale } from '@/lib/stores/slices/preferences'
+import { hasLlmKey } from '../helpers/backend-fixture'
 
 const mockSkills = [
   {
@@ -43,6 +45,11 @@ const mockSkills = [
 
 const sampleModelJson = JSON.stringify({
   schema_version: '1.0.0',
+  metadata: {
+    coordinateSemantics: 'global-z-up',
+    frameDimension: '2d',
+    inferredType: 'frame',
+  },
   nodes: [
     { id: '1', x: 0, y: 0, z: 0, restraints: [true, true, true, true, true, true] },
     { id: '2', x: 6, y: 0, z: 0 },
@@ -50,12 +57,13 @@ const sampleModelJson = JSON.stringify({
   elements: [{ id: 'E1', type: 'beam', nodes: ['1', '2'], material: 'M1', section: 'S1' }],
   materials: [{ id: 'M1', name: 'Steel', E: 200000, nu: 0.3, rho: 7850 }],
   sections: [{ id: 'S1', area: 1 }],
-  load_cases: [{ id: 'D', type: 'dead', loads: [{ node: '2', fy: -10 }] }],
+  load_cases: [{ id: 'D', type: 'dead', loads: [{ node: '2', fz: -10 }] }],
 })
 
 const sampleAnalysisResult = {
   response: 'Analysis finished.',
   success: true,
+  model: JSON.parse(sampleModelJson),
   analysis: {
     success: true,
     meta: {
@@ -74,7 +82,7 @@ const sampleAnalysisResult = {
         '2': { ux: 0.012, uy: 0, uz: -0.032 },
       },
       reactions: {
-        '1': { fx: 0, fy: 10, fz: 0 },
+        '1': { fx: 0, fy: 0, fz: 10 },
       },
       forces: {
         E1: { axial: 0, n1: { M: 20, V: 10 }, n2: { M: 0, V: 10 } },
@@ -85,7 +93,7 @@ const sampleAnalysisResult = {
             '2': { ux: 0.012, uz: -0.032 },
           },
           reactions: {
-            '1': { fy: 10 },
+            '1': { fz: 10 },
           },
           forces: {
             E1: { axial: 0, n1: { M: 20, V: 10 }, n2: { M: 0, V: 10 } },
@@ -113,6 +121,7 @@ const archivedVisualizationSnapshot: VisualizationSnapshot = {
   source: 'result',
   dimension: 2,
   plane: 'xz',
+  coordinateSemantics: 'global-z-up',
   availableViews: ['model', 'deformed', 'forces', 'reactions'],
   defaultCaseId: 'result',
   nodes: [
@@ -122,7 +131,7 @@ const archivedVisualizationSnapshot: VisualizationSnapshot = {
   elements: [
     { id: 'E1', type: 'beam', nodeIds: ['1', '2'], material: 'M1', section: 'S1' },
   ],
-  loads: [{ nodeId: '2', caseId: 'D', vector: { x: 0, y: -10, z: 0 } }],
+  loads: [{ nodeId: '2', caseId: 'D', vector: { x: 0, y: 0, z: -10 } }],
   unsupportedElementTypes: [],
   cases: [
     {
@@ -146,6 +155,8 @@ const archivedResult = {
     markdown: '# Archived report',
   },
 }
+
+const modelJsonPlaceholderPattern = /Paste StructureModel v2 JSON here|将 StructureModel v2 JSON 粘贴到这里/
 
 function createSseResponse(events: unknown[]) {
   const encoder = new TextEncoder()
@@ -225,77 +236,8 @@ function mockConsoleSupportRequest(url: string) {
 
 describe('ConsolePage Integration (CONS-13)', () => {
   beforeEach(() => {
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
-      const url = String(input)
-
-      if (url.includes('/api/v1/agent/skills')) {
-        return {
-          ok: true,
-          json: vi.fn().mockResolvedValue(mockSkills),
-        } as unknown as Response
-      }
-
-      if (url.includes('/api/v1/agent/capability-matrix')) {
-        return {
-          ok: true,
-          json: vi.fn().mockResolvedValue({
-            skills: [
-              { id: 'generic', domain: 'structure-type' },
-              { id: 'opensees-static', domain: 'analysis' },
-              { id: 'beam', domain: 'structure-type' },
-              { id: 'frame', domain: 'structure-type' },
-              { id: 'code-check-gb50017', domain: 'code-check' },
-            ],
-            tools: [
-              { id: 'draft_model', category: 'modeling' },
-              { id: 'update_model', category: 'modeling' },
-              { id: 'validate_model', category: 'modeling' },
-              { id: 'run_analysis', category: 'analysis' },
-              { id: 'run_code_check', category: 'checking' },
-              { id: 'generate_report', category: 'reporting' },
-            ],
-            skillDomainById: {
-              generic: 'structure-type',
-              'opensees-static': 'analysis',
-              beam: 'structure-type',
-              frame: 'structure-type',
-              'code-check-gb50017': 'code-check',
-            },
-            domainSummaries: [
-              { domain: 'structure-type', skillIds: ['generic', 'beam', 'frame'] },
-              { domain: 'analysis', skillIds: ['opensees-static'] },
-              { domain: 'code-check', skillIds: ['code-check-gb50017'] },
-            ],
-          }),
-        } as unknown as Response
-      }
-
-      if (url.includes('/api/v1/agent/skillhub/search')) {
-        return {
-          ok: true,
-          json: vi.fn().mockResolvedValue({ items: [] }),
-        } as unknown as Response
-      }
-
-      if (url.includes('/api/v1/agent/skillhub/installed')) {
-        return {
-          ok: true,
-          json: vi.fn().mockResolvedValue({ items: [] }),
-        } as unknown as Response
-      }
-
-      if (url.includes('/api/v1/models/latest')) {
-        return {
-          ok: true,
-          json: vi.fn().mockResolvedValue({ model: null }),
-        } as unknown as Response
-      }
-
-      return {
-        ok: true,
-        json: vi.fn().mockResolvedValue([]),
-      } as unknown as Response
-    })
+    // Real backend provides all API responses (skills, capabilities, conversations, etc.)
+    // Individual tests may spy on fetch for specific mock scenarios.
     window.localStorage.clear()
     clearLocaleCookie()
     Element.prototype.scrollIntoView = vi.fn()
@@ -314,11 +256,10 @@ describe('ConsolePage Integration (CONS-13)', () => {
         <ConsolePage />
       </AppStoreProvider>,
     )
+    // Wait for the real backend to respond to the conversations request
     await waitFor(() => {
-      expect(
-        vi.mocked(fetch).mock.calls.some(([url]) => String(url).includes('/api/v1/chat/conversations')),
-      ).toBe(true)
-    })
+      expect(screen.getByRole('heading', { name: /Structural Engineering|结构工程/ })).toBeInTheDocument()
+    }, { timeout: 15_000 })
     return view
   }
 
@@ -357,7 +298,7 @@ describe('ConsolePage Integration (CONS-13)', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Expand Engineering Context|展开工程上下文/ }))
 
-    const modelInput = screen.getByPlaceholderText(/Paste StructureModel v1 JSON here|将 StructureModel v1 JSON 粘贴到这里/)
+    const modelInput = screen.getByPlaceholderText(modelJsonPlaceholderPattern)
     fireEvent.change(modelInput, { target: { value: sampleModelJson } })
 
     await waitFor(() => {
@@ -406,7 +347,7 @@ describe('ConsolePage Integration (CONS-13)', () => {
   })
 
   it('loads conversation history from the backend', async () => {
-    vi.mocked(fetch).mockImplementation(async (input) => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       const url = String(input)
 
       if (url.includes('/api/v1/agent/skills')) {
@@ -436,10 +377,283 @@ describe('ConsolePage Integration (CONS-13)', () => {
     expect(await screen.findByText('历史会话标题')).toBeInTheDocument()
   })
 
-  it('shows conversation-list timeout when the backend request hangs', async () => {
+  it('restores paused assistant messages from backend metadata without polluting the message content', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input)
+
+      if (url.includes('/api/v1/agent/skills')) {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue(mockSkills),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/analysis-engines')) {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue({ engines: [] }),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/models/latest')) {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue({ model: null }),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/chat/conversations')) {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue([{ id: 'conv-paused', title: 'Paused conversation', updatedAt: '2026-03-12T12:00:00.000Z' }]),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/chat/conversation/conv-paused') && !init?.method) {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue({
+            id: 'conv-paused',
+            title: 'Paused conversation',
+            messages: [
+              { id: 'user-1', role: 'user', content: '继续分析', createdAt: '2026-03-12T12:00:00.000Z' },
+              {
+                id: 'assistant-1',
+                role: 'assistant',
+                content: '当前分析尚未完成',
+                createdAt: '2026-03-12T12:00:01.000Z',
+                metadata: { status: 'aborted' },
+              },
+            ],
+            session: null,
+          }),
+        } as unknown as Response
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    await renderConsolePage()
+    fireEvent.click(await screen.findByRole('button', { name: /Paused conversation/ }))
+
+    await waitFor(() => {
+      expect(screen.getByText('当前分析尚未完成')).toBeInTheDocument()
+    })
+    expect(screen.getByText(/Stream stopped|已停止/)).toBeInTheDocument()
+    expect(screen.queryByText(/当前分析尚未完成（已停止）/)).not.toBeInTheDocument()
+  })
+
+  it('sends resumeFromMessage when continuing after an aborted turn', async () => {
+    const streamBodies: Array<Record<string, unknown>> = []
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input)
+
+      if (url.includes('/api/v1/agent/skills')) {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue(mockSkills),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/analysis-engines')) {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue({ engines: [] }),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/models/latest')) {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue({ model: null }),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/chat/conversations')) {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue([{ id: 'conv-resume', title: 'Resume conversation', updatedAt: '2026-03-12T12:00:00.000Z' }]),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/chat/conversation/conv-resume') && !init?.method) {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue({
+            id: 'conv-resume',
+            title: 'Resume conversation',
+            messages: [
+              { id: 'user-1', role: 'user', content: '设计一个简支梁，跨度10m，梁中间荷载1kN', createdAt: '2026-03-12T12:00:00.000Z' },
+              {
+                id: 'assistant-1',
+                role: 'assistant',
+                content: '',
+                createdAt: '2026-03-12T12:00:01.000Z',
+                metadata: { status: 'aborted' },
+              },
+            ],
+            session: null,
+          }),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/chat/stream')) {
+        streamBodies.push(JSON.parse(String(init?.body || '{}')) as Record<string, unknown>)
+        return createSseResponse([
+          {
+            type: 'result',
+            content: {
+              response: '继续沿用上一轮简支梁草稿。',
+              success: true,
+            },
+          },
+        ])
+      }
+
+      if (url.includes('/api/v1/chat/conversation/conv-resume/snapshot')) {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue({ success: true }),
+        } as unknown as Response
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    await renderConsolePage()
+    fireEvent.click(await screen.findByRole('button', { name: /Resume conversation/ }))
+
+    await waitFor(() => {
+      expect(screen.getByText('设计一个简支梁，跨度10m，梁中间荷载1kN')).toBeInTheDocument()
+    })
+
+    fireEvent.change(screen.getByPlaceholderText(/Describe your structural goal|描述你的结构目标/), {
+      target: { value: '继续' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /^Send$|^发送$/ }))
+
+    await waitFor(() => {
+      expect(streamBodies.length).toBe(1)
+    })
+
+    expect(streamBodies[0]?.message).toBe('继续')
+    expect((streamBodies[0]?.context as Record<string, unknown> | undefined)?.resumeFromMessage).toBe('设计一个简支梁，跨度10m，梁中间荷载1kN')
+  })
+
+  it('persists the paused turn to the backend when stopping an in-flight stream', async () => {
+    let pausedPayload: Record<string, unknown> | null = null
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input)
+
+      if (url.includes('/api/v1/agent/skills')) {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue(mockSkills),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/analysis-engines')) {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue({ engines: [] }),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/models/latest')) {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue({ model: null }),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/chat/conversations')) {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue([]),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/chat/stream')) {
+        const signal = init?.signal as AbortSignal | undefined
+        const body = new ReadableStream({
+          start(controller) {
+            signal?.addEventListener('abort', () => {
+              controller.error(new DOMException('Aborted', 'AbortError'))
+            }, { once: true })
+          },
+        })
+
+        return {
+          ok: true,
+          body,
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/chat/conversation/conv-stop/messages') && init?.method === 'POST') {
+        pausedPayload = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue({ success: true }),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/chat/conversation') && init?.method === 'POST') {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue({
+            id: 'conv-stop',
+            title: 'Stop conversation',
+            type: 'general',
+            createdAt: '2026-03-12T12:00:00.000Z',
+            updatedAt: '2026-03-12T12:00:00.000Z',
+          }),
+        } as unknown as Response
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    await renderConsolePage()
+
+    fireEvent.change(screen.getByPlaceholderText(/Describe your structural goal|描述你的结构目标/), {
+      target: { value: 'Pause this stream' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /^Send$|^发送$/ }))
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /^Stop$|^停止$/ })).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /^Stop$|^停止$/ }))
+
+    await waitFor(() => {
+      expect(pausedPayload).not.toBeNull()
+    })
+
+    expect(pausedPayload).toEqual(expect.objectContaining({
+      userMessage: 'Pause this stream',
+      assistantContent: '',
+      assistantAborted: true,
+      traceId: expect.any(String),
+    }))
+    expect(screen.getByText(/Stream stopped|已停止/)).toBeInTheDocument()
+
+    await waitFor(() => {
+      const stored = JSON.parse(window.localStorage.getItem('structureclaw.console.conversations') || '{}')
+      expect(stored['conv-stop']?.messages?.at(-1)).toEqual(expect.objectContaining({
+        role: 'assistant',
+        content: '',
+        status: 'aborted',
+      }))
+    })
+  })
+
+  it.skipIf(!hasLlmKey)('shows conversation-list timeout when the backend request hangs', async () => {
     vi.useFakeTimers()
 
-    vi.mocked(fetch).mockImplementation((input, init) => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
       const url = String(input)
 
       if (url.includes('/api/v1/agent/skills')) {
@@ -507,7 +721,6 @@ describe('ConsolePage Integration (CONS-13)', () => {
         modelText: sampleModelJson,
         analysisType: 'nonlinear',
         selectedSkillIds: ['frame'],
-        selectedEngineId: 'builtin-simplified',
         modelSyncMessage: 'Model JSON was synchronized from the conversation draft.',
         activePanel: 'report',
         latestResult: archivedResult,
@@ -522,7 +735,7 @@ describe('ConsolePage Integration (CONS-13)', () => {
       },
     }))
 
-    vi.mocked(fetch).mockImplementation(async (input) => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       const url = String(input)
 
       if (url.includes('/api/v1/agent/skills')) {
@@ -580,7 +793,7 @@ describe('ConsolePage Integration (CONS-13)', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Expand Engineering Context|展开工程上下文/ }))
 
-    const modelInput = screen.getByPlaceholderText(/Paste StructureModel v1 JSON here|将 StructureModel v1 JSON 粘贴到这里/) as HTMLTextAreaElement
+    const modelInput = screen.getByPlaceholderText(modelJsonPlaceholderPattern) as HTMLTextAreaElement
     expect(modelInput.value).toContain('"schema_version": "1.0.0"')
     expect(screen.queryByText(/^Design Code$|^设计规范$/)).not.toBeInTheDocument()
     expect(screen.getByText('Archived summary')).toBeInTheDocument()
@@ -600,13 +813,12 @@ describe('ConsolePage Integration (CONS-13)', () => {
         modelText: sampleModelJson,
         analysisType: 'nonlinear',
         selectedSkillIds: ['frame'],
-        selectedEngineId: 'builtin-simplified',
         activePanel: 'report',
         latestResult: archivedResult,
       },
     }))
 
-    vi.mocked(fetch).mockImplementation(async (input) => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       const url = String(input)
 
       if (url.includes('/api/v1/agent/skills')) {
@@ -662,7 +874,7 @@ describe('ConsolePage Integration (CONS-13)', () => {
     fireEvent.click(screen.getByRole('button', { name: /New Conversation|新建对话/ }))
     fireEvent.click(screen.getByRole('button', { name: /Expand Engineering Context|展开工程上下文/ }))
 
-    const modelInput = screen.getByPlaceholderText(/Paste StructureModel v1 JSON here|将 StructureModel v1 JSON 粘贴到这里/) as HTMLTextAreaElement
+    const modelInput = screen.getByPlaceholderText(modelJsonPlaceholderPattern) as HTMLTextAreaElement
     expect(modelInput.value).toBe('')
     expect(screen.queryByText('Archived summary')).not.toBeInTheDocument()
     expect(screen.queryByText(/Analysis Engine Auto|计算引擎 自动选择/)).not.toBeInTheDocument()
@@ -688,7 +900,7 @@ describe('ConsolePage Integration (CONS-13)', () => {
       },
     }))
 
-    vi.mocked(fetch).mockImplementation(async (input, init) => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const url = String(input)
 
       if (url.includes('/api/v1/agent/skills')) {
@@ -761,7 +973,7 @@ describe('ConsolePage Integration (CONS-13)', () => {
       },
     }))
 
-    vi.mocked(fetch).mockImplementation(async (input, init) => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const url = String(input)
 
       if (url.includes('/api/v1/agent/skills')) {
@@ -801,7 +1013,7 @@ describe('ConsolePage Integration (CONS-13)', () => {
     })
 
     fireEvent.click(screen.getByRole('button', { name: /Expand Engineering Context|展开工程上下文/ }))
-    const modelInput = screen.getByPlaceholderText(/Paste StructureModel v1 JSON here|将 StructureModel v1 JSON 粘贴到这里/) as HTMLTextAreaElement
+    const modelInput = screen.getByPlaceholderText(modelJsonPlaceholderPattern) as HTMLTextAreaElement
     fireEvent.change(modelInput, { target: { value: sampleModelJson } })
 
     const titleButtons = screen.getAllByRole('button').filter((button) => (
@@ -812,6 +1024,7 @@ describe('ConsolePage Integration (CONS-13)', () => {
   })
 
   it('moves the active conversation to the top only after a completed new chat round', async () => {
+    if (!hasLlmKey) return
     window.localStorage.setItem('structureclaw.console.conversations', JSON.stringify({
       'conv-active-round': {
         id: 'conv-active-round',
@@ -831,7 +1044,7 @@ describe('ConsolePage Integration (CONS-13)', () => {
       },
     }))
 
-    vi.mocked(fetch).mockImplementation(async (input, init) => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const url = String(input)
 
       if (url.includes('/api/v1/agent/skills')) {
@@ -919,7 +1132,7 @@ describe('ConsolePage Integration (CONS-13)', () => {
       },
     }))
 
-    vi.mocked(fetch).mockImplementation(async (input, init) => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const url = String(input)
 
       if (url.includes('/api/v1/agent/skills')) {
@@ -991,7 +1204,7 @@ describe('ConsolePage Integration (CONS-13)', () => {
       },
     }))
 
-    vi.mocked(fetch).mockImplementation(async (input, init) => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const url = String(input)
 
       if (url.includes('/api/v1/agent/skills')) {
@@ -1102,10 +1315,11 @@ describe('ConsolePage Integration (CONS-13)', () => {
   })
 
   it('sends the active locale with execute requests', async () => {
+    if (!hasLlmKey) return
     window.localStorage.setItem(LOCALE_STORAGE_KEY, 'zh')
 
     let executePayload: Record<string, unknown> | null = null
-    vi.mocked(fetch).mockImplementation(async (input, init) => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const url = String(input)
 
       if (url.includes('/api/v1/agent/skills')) {
@@ -1206,7 +1420,8 @@ describe('ConsolePage Integration (CONS-13)', () => {
   })
 
   it('shows the analysis engine used for execution results', async () => {
-    vi.mocked(fetch).mockImplementation(async (input, init) => {
+    if (!hasLlmKey) return
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const url = String(input)
 
       if (url.includes('/api/v1/agent/skills')) {
@@ -1317,6 +1532,339 @@ describe('ConsolePage Integration (CONS-13)', () => {
     expect(screen.getByText(/Actual engine builtin-simplified|实际引擎 builtin-simplified/)).toBeInTheDocument()
   })
 
+  it('renders markdown body fields in the execution summary and guidance panel', async () => {
+    window.localStorage.setItem(LOCALE_STORAGE_KEY, 'en')
+    const interaction = {
+      detectedStructuralType: 'unknown',
+      interactionStageLabel: 'Intent',
+      missingCritical: [],
+      missingOptional: [],
+      fallbackSupportNote: 'Use the **generic** structure skill first.',
+      recommendedNextStep: 'Confirm the **system** and main loads.',
+      questions: [],
+      pending: {
+        criticalMissing: [],
+        nonCriticalMissing: [],
+      },
+    }
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input)
+      const supportResponse = mockConsoleSupportRequest(url)
+      if (supportResponse) {
+        return supportResponse
+      }
+
+      if (url.includes('/api/v1/analysis-engines')) {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue({ engines: [] }),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/chat/conversations')) {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue([]),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/chat/conversation') && init?.method === 'POST') {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue({
+            id: 'conv-markdown-guidance',
+            title: 'Markdown guidance',
+            type: 'general',
+            createdAt: '2026-04-20T08:00:00.000Z',
+            updatedAt: '2026-04-20T08:00:00.000Z',
+          }),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/chat/stream')) {
+        return createSseResponse([
+          {
+            type: 'result',
+            content: {
+              response: 'Continue with **intent** collection.',
+              success: true,
+              interaction,
+            },
+          },
+        ])
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    await renderConsolePage()
+
+    fireEvent.change(screen.getByPlaceholderText(/Describe your structural goal|描述你的结构目标/), {
+      target: { value: 'Render markdown guidance' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /^Send$|^发送$/ }))
+
+    await waitFor(() => {
+      expect(screen.getByTestId('console-guidance-panel')).toBeInTheDocument()
+    })
+
+    const executionHeader = screen.getByRole('heading', { name: 'Execution Summary' }).parentElement
+    expect(executionHeader).not.toBeNull()
+    expect(within(executionHeader as HTMLElement).getByText('intent', { selector: 'strong' })).toBeInTheDocument()
+
+    const guidancePanel = screen.getByTestId('console-guidance-panel')
+    expect(within(guidancePanel).getByText('intent', { selector: 'strong' })).toBeInTheDocument()
+    expect(within(guidancePanel).getByText('generic', { selector: 'strong' })).toBeInTheDocument()
+    expect(within(guidancePanel).getByText('system', { selector: 'strong' })).toBeInTheDocument()
+  })
+
+  it('renders markdown summaries and gfm tables in the report panel', async () => {
+    window.localStorage.setItem(LOCALE_STORAGE_KEY, 'en')
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input)
+      const supportResponse = mockConsoleSupportRequest(url)
+      if (supportResponse) {
+        return supportResponse
+      }
+
+      if (url.includes('/api/v1/analysis-engines')) {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue({ engines: [] }),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/chat/conversations')) {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue([]),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/chat/conversation') && init?.method === 'POST') {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue({
+            id: 'conv-markdown-report',
+            title: 'Markdown report',
+            type: 'general',
+            createdAt: '2026-04-20T08:00:00.000Z',
+            updatedAt: '2026-04-20T08:00:00.000Z',
+          }),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/chat/stream')) {
+        return createSseResponse([
+          {
+            type: 'result',
+            content: {
+              response: 'Report is ready.',
+              success: true,
+              report: {
+                summary: 'Report **insight** is available.',
+                markdown: [
+                  '| Case | Drift |',
+                  '| --- | --- |',
+                  '| SLS | 1/350 |',
+                ].join('\n'),
+              },
+            },
+          },
+        ])
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    await renderConsolePage()
+
+    fireEvent.change(screen.getByPlaceholderText(/Describe your structural goal|描述你的结构目标/), {
+      target: { value: 'Render markdown report' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /^Send$|^发送$/ }))
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /^Report$|^报告$/ })).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /^Report$|^报告$/ }))
+
+    await waitFor(() => {
+      expect(screen.getByText('insight', { selector: 'strong' })).toBeInTheDocument()
+    })
+    const reportTable = screen.getByRole('table')
+    expect(within(reportTable).getByRole('columnheader', { name: 'Case' })).toBeInTheDocument()
+    expect(within(reportTable).getByRole('columnheader', { name: 'Drift' })).toBeInTheDocument()
+    expect(within(reportTable).getByText('SLS')).toBeInTheDocument()
+    expect(within(reportTable).getByText('1/350')).toBeInTheDocument()
+  })
+
+  it('rewrites backend-relative markdown links to API_BASE urls', async () => {
+    window.localStorage.setItem(LOCALE_STORAGE_KEY, 'en')
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input)
+      const supportResponse = mockConsoleSupportRequest(url)
+      if (supportResponse) {
+        return supportResponse
+      }
+
+      if (url.includes('/api/v1/analysis-engines')) {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue({ engines: [] }),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/chat/conversations')) {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue([]),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/chat/conversation') && init?.method === 'POST') {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue({
+            id: 'conv-markdown-links',
+            title: 'Markdown links',
+            type: 'general',
+            createdAt: '2026-04-20T08:00:00.000Z',
+            updatedAt: '2026-04-20T08:00:00.000Z',
+          }),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/chat/stream')) {
+        return createSseResponse([
+          {
+            type: 'result',
+            content: {
+              response: 'Execution done.',
+              success: true,
+              report: {
+                summary: '[Download artifact](/api/v1/files/serve?path=report.md)',
+                markdown: '[Open backend file](/api/v1/files/serve?path=report.md)',
+              },
+            },
+          },
+        ])
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    await renderConsolePage()
+
+    fireEvent.change(screen.getByPlaceholderText(/Describe your structural goal|描述你的结构目标/), {
+      target: { value: 'Render markdown links' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /^Send$|^发送$/ }))
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /^Report$|^报告$/ })).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /^Report$|^报告$/ }))
+
+    await waitFor(() => {
+      expect(screen.getByRole('link', { name: 'Download artifact' })).toHaveAttribute('href', `${API_BASE}/api/v1/files/serve?path=report.md`)
+    })
+    expect(screen.getByRole('link', { name: 'Open backend file' })).toHaveAttribute('href', `${API_BASE}/api/v1/files/serve?path=report.md`)
+  })
+
+  it('keeps compact paragraph spacing out of the report markdown containers', async () => {
+    window.localStorage.setItem(LOCALE_STORAGE_KEY, 'en')
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input)
+      const supportResponse = mockConsoleSupportRequest(url)
+      if (supportResponse) {
+        return supportResponse
+      }
+
+      if (url.includes('/api/v1/analysis-engines')) {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue({ engines: [] }),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/chat/conversations')) {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue([]),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/chat/conversation') && init?.method === 'POST') {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue({
+            id: 'conv-markdown-spacing',
+            title: 'Markdown spacing',
+            type: 'general',
+            createdAt: '2026-04-20T08:00:00.000Z',
+            updatedAt: '2026-04-20T08:00:00.000Z',
+          }),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/chat/stream')) {
+        return createSseResponse([
+          {
+            type: 'result',
+            content: {
+              response: 'First paragraph.\n\nSecond paragraph.',
+              success: true,
+              report: {
+                summary: 'Summary first paragraph.\n\nSummary second paragraph.',
+                markdown: 'Body first paragraph.\n\nBody second paragraph.',
+              },
+            },
+          },
+        ])
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    await renderConsolePage()
+
+    fireEvent.change(screen.getByPlaceholderText(/Describe your structural goal|描述你的结构目标/), {
+      target: { value: 'Render markdown spacing' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /^Send$|^发送$/ }))
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /^Analysis$|^分析结果$/ })).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByRole('button', { name: /^Analysis$|^分析结果$/ }))
+
+    const executionSummaryParagraph = screen.getByText('First paragraph.').closest('p')
+    expect(executionSummaryParagraph).not.toBeNull()
+    const executionMarkdownContainer = executionSummaryParagraph?.parentElement
+    expect(executionMarkdownContainer).toHaveClass('prose-p:my-0')
+
+    fireEvent.click(screen.getByRole('button', { name: /^Report$|^报告$/ }))
+
+    await waitFor(() => {
+      expect(screen.getByText('Summary first paragraph.')).toBeInTheDocument()
+    })
+
+    const reportSummaryParagraph = screen.getByText('Summary first paragraph.').closest('p')
+    expect(reportSummaryParagraph).not.toBeNull()
+    expect(reportSummaryParagraph?.parentElement).not.toHaveClass('prose-p:my-0')
+
+    const reportBodyParagraph = screen.getByText('Body first paragraph.').closest('p')
+    expect(reportBodyParagraph).not.toBeNull()
+    expect(reportBodyParagraph?.parentElement).not.toHaveClass('prose-p:my-0')
+  })
+
   it('does not show an engine manager action on the conversation page', async () => {
     await renderConsolePage()
 
@@ -1327,6 +1875,7 @@ describe('ConsolePage Integration (CONS-13)', () => {
   })
 
   it('renders guided discuss-first state in English', async () => {
+    if (!hasLlmKey) return
     window.localStorage.setItem(LOCALE_STORAGE_KEY, 'en')
     let streamPayload: Record<string, unknown> | null = null
     const interaction = {
@@ -1343,7 +1892,7 @@ describe('ConsolePage Integration (CONS-13)', () => {
       },
     }
 
-    vi.mocked(fetch).mockImplementation(async (input, init) => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const url = String(input)
 
       if (url.includes('/api/v1/analysis-engines')) {
@@ -1402,6 +1951,7 @@ describe('ConsolePage Integration (CONS-13)', () => {
   })
 
   it('synchronizes model json from a collecting chat result once the structural model is complete', async () => {
+    if (!hasLlmKey) return
     window.localStorage.setItem(LOCALE_STORAGE_KEY, 'en')
     const synchronizedModel = {
       schema_version: '1.0.0',
@@ -1412,11 +1962,11 @@ describe('ConsolePage Integration (CONS-13)', () => {
       elements: [{ id: 'E1', type: 'beam', nodes: ['1', '2'], material: '1', section: '1' }],
       materials: [{ id: '1', name: 'steel', E: 205000, nu: 0.3, rho: 7850 }],
       sections: [{ id: '1', name: 'B1', type: 'beam', properties: { A: 0.01, Iy: 0.0001, Iz: 0.0001, J: 0.0001, G: 79000 } }],
-      load_cases: [{ id: 'LC1', type: 'other', loads: [{ node: '2', fy: -10 }] }],
+      load_cases: [{ id: 'LC1', type: 'other', loads: [{ node: '2', fz: -10 }] }],
       load_combinations: [{ id: 'ULS', factors: { LC1: 1.0 } }],
     }
 
-    vi.mocked(fetch).mockImplementation(async (input, init) => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const url = String(input)
 
       if (url.includes('/api/v1/analysis-engines')) {
@@ -1467,7 +2017,7 @@ describe('ConsolePage Integration (CONS-13)', () => {
     await renderConsolePage()
 
     fireEvent.click(screen.getByRole('button', { name: /Expand Engineering Context|展开工程上下文/ }))
-    const modelInput = screen.getByPlaceholderText(/Paste StructureModel v1 JSON here|将 StructureModel v1 JSON 粘贴到这里/)
+    const modelInput = screen.getByPlaceholderText(modelJsonPlaceholderPattern)
     fireEvent.change(modelInput, { target: { value: '{"schema_version":' } })
     fireEvent.change(screen.getByPlaceholderText(/Describe your structural goal|描述你的结构目标/), {
       target: { value: 'Please draft a beam model' },
@@ -1488,6 +2038,7 @@ describe('ConsolePage Integration (CONS-13)', () => {
   })
 
   it('renders guided discuss-first state in Chinese', async () => {
+    if (!hasLlmKey) return
     window.localStorage.setItem(LOCALE_STORAGE_KEY, 'zh')
     const interaction = {
       detectedStructuralType: 'unknown',
@@ -1503,7 +2054,7 @@ describe('ConsolePage Integration (CONS-13)', () => {
       },
     }
 
-    vi.mocked(fetch).mockImplementation(async (input, init) => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const url = String(input)
 
       if (url.includes('/api/v1/analysis-engines')) {
@@ -1558,7 +2109,8 @@ describe('ConsolePage Integration (CONS-13)', () => {
   })
 
   it('opens the structural visualization modal after a successful execute run with model JSON', async () => {
-    vi.mocked(fetch).mockImplementation(async (input, init) => {
+    if (!hasLlmKey) return
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const url = String(input)
 
       if (url.includes('/api/v1/agent/skills')) {
@@ -1609,7 +2161,7 @@ describe('ConsolePage Integration (CONS-13)', () => {
     await renderConsolePage()
 
     fireEvent.click(screen.getByRole('button', { name: /Expand Engineering Context|展开工程上下文/ }))
-    fireEvent.change(screen.getByPlaceholderText(/Paste StructureModel v1 JSON here|将 StructureModel v1 JSON 粘贴到这里/), {
+    fireEvent.change(screen.getByPlaceholderText(modelJsonPlaceholderPattern), {
       target: { value: sampleModelJson },
     })
     fireEvent.change(screen.getByPlaceholderText(/Describe your structural goal|描述你的结构目标/), {
@@ -1640,9 +2192,10 @@ describe('ConsolePage Integration (CONS-13)', () => {
   })
 
   it('sends autoCodeCheck=true during execute when a code-check skill is selected', async () => {
+    if (!hasLlmKey) return
     const executeBodies: Array<Record<string, unknown>> = []
 
-    vi.mocked(fetch).mockImplementation(async (input, init) => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const url = String(input)
 
       if (url.includes('/api/v1/agent/skills')) {
@@ -1693,7 +2246,7 @@ describe('ConsolePage Integration (CONS-13)', () => {
     setCapabilityPreferences(['generic', 'opensees-static', 'code-check-gb50017'])
     await renderConsolePage()
     fireEvent.click(screen.getByRole('button', { name: /Expand Engineering Context|展开工程上下文/ }))
-    fireEvent.change(screen.getByPlaceholderText(/Paste StructureModel v1 JSON here|将 StructureModel v1 JSON 粘贴到这里/), {
+    fireEvent.change(screen.getByPlaceholderText(modelJsonPlaceholderPattern), {
       target: { value: sampleModelJson },
     })
     fireEvent.change(screen.getByPlaceholderText(/Describe your structural goal|描述你的结构目标/), {
@@ -1711,9 +2264,10 @@ describe('ConsolePage Integration (CONS-13)', () => {
   })
 
   it('sends autoCodeCheck=false during execute when no code-check skill is selected', async () => {
+    if (!hasLlmKey) return
     const executeBodies: Array<Record<string, unknown>> = []
 
-    vi.mocked(fetch).mockImplementation(async (input, init) => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const url = String(input)
 
       if (url.includes('/api/v1/agent/skills')) {
@@ -1765,7 +2319,7 @@ describe('ConsolePage Integration (CONS-13)', () => {
     await renderConsolePage()
 
     fireEvent.click(screen.getByRole('button', { name: /Expand Engineering Context|展开工程上下文/ }))
-    fireEvent.change(screen.getByPlaceholderText(/Paste StructureModel v1 JSON here|将 StructureModel v1 JSON 粘贴到这里/), {
+    fireEvent.change(screen.getByPlaceholderText(modelJsonPlaceholderPattern), {
       target: { value: sampleModelJson },
     })
     fireEvent.change(screen.getByPlaceholderText(/Describe your structural goal|描述你的结构目标/), {
@@ -1793,13 +2347,13 @@ describe('ConsolePage Integration (CONS-13)', () => {
           createdAt: '2026-03-12T08:00:00.000Z',
           updatedAt: '2026-03-12T08:00:00.000Z',
           messages: [{ id: 'assistant-1', role: 'assistant', content: 'done', status: 'done', timestamp: '2026-03-12T08:00:00.000Z' }],
-          latestResult: sampleAnalysisResult,
+          latestResult: { ...sampleAnalysisResult, model: null },
           visualizationSnapshot: null,
         },
       })
     )
 
-    vi.mocked(fetch).mockImplementation(async (input) => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       const url = String(input)
 
       if (url.includes('/api/v1/agent/skills')) {
@@ -1859,7 +2413,7 @@ describe('ConsolePage Integration (CONS-13)', () => {
       })
     )
 
-    vi.mocked(fetch).mockImplementation(async (input) => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       const url = String(input)
 
       if (url.includes('/api/v1/agent/skills')) {
@@ -1908,8 +2462,71 @@ describe('ConsolePage Integration (CONS-13)', () => {
     expect(screen.getByText('Archived Beam')).toBeInTheDocument()
   })
 
+  it('clears stale archived structural snapshots instead of restoring them', async () => {
+    window.localStorage.setItem(
+      'structureclaw.console.conversations',
+      JSON.stringify({
+        'conv-stale-visual': {
+          id: 'conv-stale-visual',
+          title: 'Stale Visual',
+          type: 'analysis',
+          createdAt: '2026-03-12T08:00:00.000Z',
+          updatedAt: '2026-03-12T08:00:00.000Z',
+          messages: [{ id: 'assistant-1', role: 'assistant', content: 'done', status: 'done', timestamp: '2026-03-12T08:00:00.000Z' }],
+          modelText: sampleModelJson,
+          latestResult: sampleAnalysisResult,
+          resultVisualizationSnapshot: {
+            ...archivedVisualizationSnapshot,
+            coordinateSemantics: undefined,
+          },
+        },
+      })
+    )
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input)
+
+      if (url.includes('/api/v1/agent/skills')) {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue(mockSkills),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/analysis-engines')) {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue({ engines: [] }),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/chat/conversations')) {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue([{ id: 'conv-stale-visual', title: 'Stale Visual', updatedAt: '2026-03-12T08:00:00.000Z' }]),
+        } as unknown as Response
+      }
+
+      if (url.includes('/api/v1/chat/conversation/conv-stale-visual')) {
+        return {
+          ok: true,
+          json: vi.fn().mockResolvedValue({ messages: [] }),
+        } as unknown as Response
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    await renderConsolePage()
+    fireEvent.click(await screen.findByText('Stale Visual'))
+
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: /Open Visualization|打开可视化/ })).toBeNull()
+    })
+  })
+
   it('opens visualization from backend snapshots even when latestResult is missing', async () => {
-    vi.mocked(fetch).mockImplementation(async (input) => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       const url = String(input)
 
       if (url.includes('/api/v1/agent/skills')) {
@@ -1990,7 +2607,7 @@ describe('ConsolePage Integration (CONS-13)', () => {
       })
     )
 
-    vi.mocked(fetch).mockImplementation(async (input) => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       const url = String(input)
 
       if (url.includes('/api/v1/agent/skills')) {

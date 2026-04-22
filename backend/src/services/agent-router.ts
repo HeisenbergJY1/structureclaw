@@ -35,6 +35,134 @@ function localize(locale: AppLocale, zh: string, en: string): string {
   return locale === 'zh' ? zh : en;
 }
 
+function hasConcreteStructuralParameters(message: string): boolean {
+  const text = message.toLowerCase();
+  if (!/\d/.test(text)) {
+    return false;
+  }
+
+  return [
+    '跨度',
+    '荷载',
+    '层高',
+    '简支',
+    '悬臂',
+    '梁',
+    '框架',
+    '支座',
+    'beam',
+    'frame',
+    'column',
+    'span',
+    'load',
+    'support',
+    'story',
+    'bay',
+    'cantilever',
+  ].some((pattern) => text.includes(pattern));
+}
+
+function hasAnalysisLikeExecutionIntent(message: string): boolean {
+  const text = message.toLowerCase().trim();
+  if (!text) {
+    return false;
+  }
+
+  return [
+    '执行分析',
+    '开始分析',
+    '运行分析',
+    '直接分析',
+    '开始计算',
+    '运行计算',
+    '执行计算',
+    '开始求解',
+    '运行求解',
+    '分析这个模型',
+    '设计',
+    '算一下',
+    '算一算',
+    '验算',
+    '校核',
+    'run analysis',
+    'start analysis',
+    'perform analysis',
+    'run the analysis',
+    'analyze this model',
+    'solve this model',
+    'calculate the result',
+    'design',
+    'size',
+    'sizing',
+    'check this model',
+  ].some((pattern) => text.includes(pattern));
+}
+
+function isExplicitModelOnlyRequest(message: string): boolean {
+  const text = message.toLowerCase().trim();
+  if (!text) {
+    return false;
+  }
+
+  const modelOnlyPatterns = [
+    '只建模',
+    '仅建模',
+    '只生成模型',
+    '只出模型',
+    '仅输出模型',
+    'model only',
+    'only model',
+    'build a model',
+    'draft a model',
+    'create a model',
+  ];
+  if (modelOnlyPatterns.some((pattern) => text.includes(pattern))) {
+    return true;
+  }
+
+  const modelPatterns = [
+    '建模',
+    '模型',
+    '生成模型',
+    '更新模型',
+    'draft model',
+    'build model',
+    'create model',
+    'update model',
+    'structural model',
+  ];
+  return modelPatterns.some((pattern) => text.includes(pattern))
+    && !hasAnalysisLikeExecutionIntent(text);
+}
+
+function normalizeExecuteTargetArtifact(
+  message: string,
+  normalized: Pick<AgentNextStepPlan, 'kind' | 'replyMode' | 'targetArtifact'>,
+  availableToolIds: AgentToolName[],
+  hasModel: boolean,
+): Pick<AgentNextStepPlan, 'kind' | 'replyMode' | 'targetArtifact'> {
+  if (normalized.kind !== 'execute' || normalized.targetArtifact !== 'normalizedModel') {
+    return normalized;
+  }
+
+  if (!availableToolIds.includes('run_analysis')) {
+    return normalized;
+  }
+
+  if (isExplicitModelOnlyRequest(message)) {
+    return normalized;
+  }
+
+  if (hasAnalysisLikeExecutionIntent(message) && (hasConcreteStructuralParameters(message) || hasModel)) {
+    return {
+      ...normalized,
+      targetArtifact: 'analysisRaw',
+    };
+  }
+
+  return normalized;
+}
+
 function extractHttpStatus(error: unknown): number | undefined {
   const status = (error as any)?.response?.status;
   return typeof status === 'number' ? status : undefined;
@@ -114,7 +242,7 @@ export function extractJsonObject(raw: string): string | null {
 export function parsePlannerResponse(
   raw: string,
   allowedKinds: AgentPlanKind[],
-): Pick<AgentNextStepPlan, 'kind' | 'replyMode'> | null {
+): Pick<AgentNextStepPlan, 'kind' | 'replyMode' | 'targetArtifact'> | null {
   const jsonText = extractJsonObject(raw);
   if (!jsonText) {
     return null;
@@ -123,7 +251,8 @@ export function parsePlannerResponse(
   const parsed = JSON.parse(jsonText) as {
     kind?: unknown;
     replyMode?: unknown;
-    decision?: { kind?: unknown; replyMode?: unknown };
+    targetArtifact?: unknown;
+    decision?: { kind?: unknown; replyMode?: unknown; targetArtifact?: unknown };
   };
   const payload = typeof parsed.decision === 'object' && parsed.decision !== null ? parsed.decision : parsed;
 
@@ -138,6 +267,7 @@ export function parsePlannerResponse(
   return {
     kind,
     replyMode,
+    targetArtifact: typeof payload.targetArtifact === 'string' ? payload.targetArtifact : undefined,
   };
 }
 
@@ -152,8 +282,9 @@ export async function repairPlannerResponse(
     locale: AppLocale;
     allowedKinds: AgentPlanKind[];
     availableToolIds: AgentToolName[];
+    signal?: AbortSignal;
   },
-): Promise<Pick<AgentNextStepPlan, 'kind' | 'replyMode'> | null> {
+): Promise<Pick<AgentNextStepPlan, 'kind' | 'replyMode' | 'targetArtifact'> | null> {
   if (!llm) {
     return null;
   }
@@ -164,13 +295,13 @@ export async function repairPlannerResponse(
     'Preserve the original intent. Only fix formatting or minor schema issues.',
     `Allowed kinds: ${options.allowedKinds.join(', ')}`,
     'Output schema:',
-    `{"kind":"${options.allowedKinds.join('|')}","replyMode":"plain|structured|null","reason":"short reason"}`,
+    `{"kind":"${options.allowedKinds.join('|')}","replyMode":"plain|structured|null","targetArtifact":"analysisRaw|codeCheckResult|reportArtifact|normalizedModel|null","reason":"short reason"}`,
     `Locale: ${options.locale}`,
     `Planner output to normalize:\n${raw}`,
   ].join('\n');
 
   try {
-    const repaired = await llm.invoke(prompt);
+    const repaired = await llm.invoke(prompt, { signal: options.signal });
     const repairedRaw = typeof repaired.content === 'string'
       ? repaired.content
       : JSON.stringify(repaired.content);
@@ -260,6 +391,7 @@ export async function planNextStepWithLlm(
     activeToolIds?: ActiveToolSet;
     allowedKinds?: AgentPlanKind[];
     conversationId?: string;
+    signal?: AbortSignal;
   },
   assessInteractionNeeds: AssessInteractionNeedsFn,
 ): Promise<AgentNextStepPlan> {
@@ -271,8 +403,8 @@ export async function planNextStepWithLlm(
     const snapshot = await buildPlannerContextSnapshot(options, assessInteractionNeeds);
     const allowedKinds: AgentPlanKind[] = Array.isArray(options.allowedKinds) && options.allowedKinds.length > 0
       ? options.allowedKinds
-      : ['reply', 'ask', 'tool_call'];
-    const allowToolCall = allowedKinds.includes('tool_call');
+      : ['reply', 'ask', 'execute'];
+    const allowExecute = allowedKinds.includes('execute');
     const availableToolIds = snapshot.availableToolIds.filter((toolId): toolId is AgentToolName => (
       ['draft_model', 'update_model', 'convert_model', 'validate_model', 'run_analysis', 'run_code_check', 'generate_report'] as string[]
     ).includes(toolId));
@@ -281,42 +413,43 @@ export async function planNextStepWithLlm(
     'Decide the single best next step for the latest user message.',
     'Available skills and tools constrain what can be invoked, but they do not force invocation.',
     'If the user is greeting, chatting casually, or asking a non-execution question, choose reply.',
-    allowToolCall
-      ? 'Avoid tool_call for vague or exploratory messages, BUT when the user provides concrete structural parameters (dimensions, loads, materials) AND explicitly requests analysis, modeling, code checking, or calculation, ALWAYS choose tool_call.'
-      : 'Tool invocation is not allowed in this planning mode. Choose only reply or ask.',
+    allowExecute
+      ? 'Avoid execute for vague or exploratory messages, BUT when the user provides concrete structural parameters (dimensions, loads, materials) AND explicitly requests analysis, modeling, code checking, or calculation, ALWAYS choose execute with the appropriate targetArtifact.'
+      : 'Execution is not allowed in this planning mode. Choose only reply or ask.',
     'When there is an active engineering session with missing parameters, and the latest user message adds structure type, geometry, topology, material, section, load, support, or report details, do not choose a plain reply.',
     'In that situation, choose ask so the structured engineering session continues, unless the information is now complete enough that a structured reply is clearly better.',
-    'Treat short parameter fragments such as "钢框架结构体系", "每层3m", "x方 向4跨", "Q355", or similar engineering increments as continuation turns, not casual chat.',
+    'Treat short parameter fragments such as "钢框架结构体系", "每层3m", "x方向4跨", "Q355", or similar engineering increments as continuation turns, not casual chat.',
     'If the previous assistant message was asking for engineering parameters and the latest user message answers that request, continue the structured engineering session.',
     'If the user changes previously confirmed geometry, loads, supports, material, or section values, treat that as a model update request rather than a plain question.',
-    'If there is an existing engineering session or model and the user says things like "改成", "改为", "change to", "update", or modifies previously analyzed values, prefer tool_call when tool invocation is allowed.',
-    'After a model update request, prefer tool_call when the user expects the updated model to be used immediately for analysis or refreshed engineering results.',
-    'If the user explicitly asks to build, model, generate, or revise a structural model now, that can also justify tool_call even if the request is not yet an analysis execution request.',
+    'If there is an existing engineering session or model and the user says things like "改成", "改为", "change to", "update", or modifies previously analyzed values, prefer execute when execution is allowed.',
+    'After a model update request, prefer execute when the user expects the updated model to be used immediately for analysis or refreshed engineering results.',
+    'If the user explicitly asks to build, model, generate, or revise a structural model now, that can also justify execute even if the request is not yet an analysis execution request.',
+    'In the current OpenSees workflow, when run_analysis is available and the user gives concrete structural parameters while asking to design, size, calculate, or check the structure, prefer targetArtifact="analysisRaw" unless the user explicitly asks for model-only output.',
     'An existing context model is only reusable context. It must not override the latest user request by itself.',
-    'If the latest message clearly asks for a new or different structural model, choose tool_call even when an older context model already exists.',
-    'For requests like "建模一个简支梁，跨度10m，均布荷载1kN/m，可以用10个单元建模", prefer tool_call when the information is sufficient to attempt a first structural model draft.',
-    allowToolCall
-      ? 'Messages containing structural parameters AND analysis intent MUST produce kind=tool_call. Examples: "简支梁6米，均布荷载20kN/m，请进行静力分析", "2-story single-bay steel frame, story height 3.6m, bay 6m, floor load 10kN/m2, analyze and check", "门式刚架，跨度18m，高度7m，屋面荷载6kN/m，分析", "3层2跨框架，层高3.3m，跨度5.4m和6m，每层楼面荷载15kN/m，请分析".'
+    'If the latest message clearly asks for a new or different structural model, choose execute even when an older context model already exists.',
+    'For requests like "建模一个简支梁，跨度10m，均布荷载1kN/m，可以用10个单元建模", prefer execute when the information is sufficient to attempt a first structural model draft.',
+    allowExecute
+      ? 'Messages containing structural parameters AND analysis intent MUST produce kind=execute with targetArtifact="analysisRaw". Examples: "简支梁6米，均布荷载20kN/m，请进行静力分析", "2-story single-bay steel frame, story height 3.6m, bay 6m, floor load 10kN/m2, analyze and check", "门式刚架，跨度18m，高度7m，屋面荷载6kN/m，分析", "3层2跨框架，层高3.3m，跨度5.4m和6m，每层楼面荷载15kN/m，请分析".'
       : '',
     'Use replyMode=plain only for casual chat, greetings, meta questions, or clearly non-engineering turns.',
-    'Use replyMode=structured for engineering follow-ups that should stay grounded in the current structural context without immediately invoking tools.',
+    'Use replyMode=structured for engineering follow-ups that should stay grounded in the current structural context without immediately invoking execution.',
     'Choose ask when the user is pursuing an engineering task but key information is still missing.',
-    allowToolCall
-      ? 'Choose tool_call when the user is clearly asking to create/update a model now, or to execute/continue engineering execution now.'
+    allowExecute
+      ? 'Choose execute when the user is clearly asking to create/update a model now, or to execute/continue engineering execution now.'
       : 'Choose ask when more engineering details are needed before the next turn can proceed.',
     'If the user message looks like a parameter fragment or engineering follow-up, plain reply is almost always wrong.',
     'Use replyMode=structured only when a structural model already exists or the engineering draft is already ready and the best next step is to explain, summarize, or confirm readiness rather than ask or execute.',
-    allowToolCall
-      ? `When kind=tool_call, do not choose concrete tools. The runtime will select tools from enabled capabilities: ${availableToolIds.join(', ') || 'none'}.`
-      : 'When tool invocation is not allowed, choose only reply or ask.',
+    allowExecute
+      ? 'When kind=execute, set targetArtifact to indicate which artifact the pipeline should produce:\n  - "analysisRaw" when the user wants structural analysis\n  - "codeCheckResult" when the user wants code compliance checking\n  - "reportArtifact" when the user wants a report\n  - "normalizedModel" when the user wants to create or update a structural model\n  - null when kind is not execute'
+      : 'When execution is not allowed, choose only reply or ask.',
     'Return strict JSON only with this schema:',
-    `{"kind":"${allowedKinds.join('|')}","replyMode":"plain|structured|null","reason":"short reason"}`,
+    `{"kind":"${allowedKinds.join('|')}","replyMode":"plain|structured|null","targetArtifact":"analysisRaw|codeCheckResult|reportArtifact|normalizedModel|null","reason":"short reason"}`,
     `Locale: ${options.locale}`,
     `User message: ${message}`,
     `Planner context: ${JSON.stringify(snapshot)}`,
     ].join('\n');
 
-    const aiMessage = await llm.invoke(prompt);
+    const aiMessage = await llm.invoke(prompt, { signal: options.signal });
     const raw = typeof aiMessage.content === 'string'
       ? aiMessage.content
       : JSON.stringify(aiMessage.content);
@@ -325,13 +458,16 @@ export async function planNextStepWithLlm(
         locale: options.locale,
         allowedKinds,
         availableToolIds,
+        signal: options.signal,
       });
     if (!normalized) {
       throw new Error('LLM_PLANNER_INVALID_RESPONSE');
     }
+    const resolvedPlan = normalizeExecuteTargetArtifact(message, normalized, availableToolIds, options.hasModel);
     return {
-      kind: normalized.kind,
-      replyMode: normalized.replyMode,
+      kind: resolvedPlan.kind,
+      replyMode: resolvedPlan.replyMode,
+      targetArtifact: resolvedPlan.targetArtifact,
       planningDirective: 'auto',
       rationale: 'llm',
     };
@@ -358,23 +494,79 @@ export async function resolveInteractivePlanKind(
   assessInteractionNeeds: AssessInteractionNeedsFn,
   hasEmptySkillSelection: HasEmptySkillSelectionFn,
   hasActiveTool: HasActiveToolFn,
-): Promise<Exclude<AgentPlanKind, 'tool_call'>> {
+): Promise<AgentNextStepPlan> {
+  // --- targetArtifact inference (Phase 4 Step 3) ---
+  // Report intent: user explicitly requested report
+  if (options.session?.resolved?.includeReport) {
+    return { kind: 'execute', planningDirective: 'auto', rationale: 'override', targetArtifact: 'reportArtifact' };
+  }
+  // Analysis intent: user has a model and an analysis type resolved
+  if (options.hasModel && options.session?.resolved?.analysisType) {
+    return { kind: 'execute', planningDirective: 'auto', rationale: 'override', targetArtifact: 'analysisRaw' };
+  }
+  // Code-check intent: design code resolved without report flag
+  if (options.hasModel && options.session?.resolved?.designCode && !options.session?.resolved?.includeReport) {
+    return { kind: 'execute', planningDirective: 'auto', rationale: 'override', targetArtifact: 'codeCheckResult' };
+  }
+
+  // --- existing logic, converted from string literals to full objects ---
   if (options.hasModel) {
-    return 'reply';
+    return { kind: 'reply', planningDirective: 'auto', rationale: 'override' };
   }
   if (hasEmptySkillSelection(options.skillIds) && !hasActiveTool(options.activeToolIds, 'draft_model')) {
-    return 'reply';
+    return { kind: 'reply', planningDirective: 'auto', rationale: 'override' };
   }
   if (!options.session?.draft || options.session.draft.inferredType === 'unknown') {
-    return 'ask';
+    return { kind: 'ask', planningDirective: 'auto', rationale: 'override' };
   }
+  // Assess interaction readiness. When hasModel is false we always fall back to
+  // 'ask' regardless of the assessment result — model building requires explicit
+  // user confirmation before proceeding. When hasModel is true (reachable via the
+  // early-return above at line 380), the assessment determines the final path.
   const assessment = await assessInteractionNeeds(options.session, options.locale, options.skillIds, 'interactive');
   const readyForExecution = assessment.criticalMissing.length === 0
     && (assessment.nonCriticalMissing.length === 0 || Boolean(options.session.userApprovedAutoDecide));
+  // Safety guard: never auto-proceed without a model — always ask for confirmation first.
   if (!options.hasModel) {
-    return 'ask';
+    return { kind: 'ask', planningDirective: 'auto', rationale: 'override' };
   }
-  return readyForExecution ? 'reply' : 'ask';
+  return readyForExecution
+    ? { kind: 'reply', planningDirective: 'auto', rationale: 'override' }
+    : { kind: 'ask', planningDirective: 'auto', rationale: 'override' };
+}
+
+// ---------------------------------------------------------------------------
+// inferTargetArtifact
+// ---------------------------------------------------------------------------
+
+function inferTargetArtifact(options: {
+  session?: InteractionSession;
+  hasModel: boolean;
+  activeToolIds?: ActiveToolSet;
+  forceExecution?: boolean;
+}): string | undefined {
+  // Always target the deepest analysis artifact, not reportArtifact.
+  // Report is handled as a follow-up after the main pipeline completes.
+  const autoCodeCheck = options.session?.resolved?.autoCodeCheck;
+  const hasResolvedDesignCode = typeof options.session?.resolved?.designCode === 'string'
+    && options.session.resolved.designCode.trim().length > 0;
+  const codeCheckEnabled = autoCodeCheck === true
+    || (autoCodeCheck !== false && hasResolvedDesignCode);
+  // Only target codeCheckResult when run_code_check is still in the active tool set.
+  const codeCheckToolActive = !options.activeToolIds || options.activeToolIds.has('run_code_check');
+  const analysisToolActive = !options.activeToolIds || options.activeToolIds.has('run_analysis');
+
+  if (options.hasModel || options.forceExecution) {
+    if (codeCheckEnabled && codeCheckToolActive) {
+      return 'codeCheckResult';
+    }
+    if (analysisToolActive) {
+      return 'analysisRaw';
+    }
+    // run_analysis not available — fall back to draft-level target
+    return 'normalizedModel';
+  }
+  return 'normalizedModel';
 }
 
 // ---------------------------------------------------------------------------
@@ -393,6 +585,7 @@ export async function planNextStep(
     session?: InteractionSession;
     activeToolIds?: ActiveToolSet;
     conversationId?: string;
+    signal?: AbortSignal;
   },
   assessInteractionNeeds: AssessInteractionNeedsFn,
   hasEmptySkillSelection: HasEmptySkillSelectionFn,
@@ -417,22 +610,29 @@ export async function planNextStep(
           activeToolIds: options.activeToolIds,
           allowedKinds: ['reply', 'ask'],
           conversationId: options.conversationId,
+          signal: options.signal,
         }, assessInteractionNeeds)),
         planningDirective: options.planningDirective,
       };
     }
 
+    const interactivePlan = await resolveInteractivePlanKind(options, assessInteractionNeeds, hasEmptySkillSelection, (ids, id) => !ids || ids.has(id));
     return {
-      kind: await resolveInteractivePlanKind(options, assessInteractionNeeds, hasEmptySkillSelection, (ids, id) => !ids || ids.has(id)),
-      replyMode: options.hasModel ? 'structured' : 'plain',
+      ...interactivePlan,
+      replyMode: interactivePlan.replyMode ?? (options.hasModel ? 'structured' : 'plain'),
       planningDirective: options.planningDirective,
       rationale: 'override',
     };
   }
 
   if (options.planningDirective === 'force_tool') {
-    return { kind: 'tool_call', planningDirective: options.planningDirective, rationale: 'override' };
+    return {
+      kind: 'execute',
+      targetArtifact: inferTargetArtifact({ ...options, forceExecution: true }),
+      planningDirective: options.planningDirective,
+      rationale: 'override',
+    };
   }
 
-  return planNextStepWithLlm(llm, message, options, assessInteractionNeeds);
+  return planNextStepWithLlm(llm, message, { ...options, signal: options.signal }, assessInteractionNeeds);
 }

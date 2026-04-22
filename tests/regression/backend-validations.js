@@ -165,6 +165,22 @@ async function validateAgentOrchestration(context) {
     assert(protocol.runRequestSchema?.type === "object", "runRequestSchema should be json schema object");
     assert(protocol.runResultSchema?.type === "object", "runResultSchema should be json schema object");
     assert(Array.isArray(protocol.streamEventSchema?.oneOf), "streamEventSchema should include oneOf");
+    assert(
+      protocol.streamEventSchema.oneOf.some((entry) => entry?.properties?.type?.const === "presentation_init"),
+      "stream schema should expose presentation_init",
+    );
+    assert(
+      protocol.streamEventSchema.oneOf.some((entry) => entry?.properties?.type?.const === "phase_upsert"),
+      "stream schema should expose phase_upsert",
+    );
+    assert(
+      protocol.streamEventSchema.oneOf.some((entry) => entry?.properties?.type?.const === "artifact_upsert"),
+      "stream schema should expose artifact_upsert",
+    );
+    assert(
+      protocol.streamEventSchema.oneOf.some((entry) => entry?.properties?.type?.const === "artifact_payload_sync"),
+      "stream schema should expose artifact_payload_sync",
+    );
     assert(protocol.tools.some((tool) => tool.name === "run_analysis"), "run_analysis tool spec should exist");
     assert(protocol.tools.every((tool) => tool.outputSchema && typeof tool.outputSchema === "object"), "tool outputSchema should exist");
     assert(protocol.tools.every((tool) => Array.isArray(tool.errorCodes)), "tool errorCodes should be array");
@@ -300,6 +316,8 @@ async function validateAgentOrchestration(context) {
     assert(result.toolCalls.some((call) => call.tool === "draft_model"), "draft_model should be called");
     assert(result.toolCalls.some((call) => call.tool === "validate_model"), "validate_model should be called after draft");
     assert(result.toolCalls.some((call) => call.tool === "run_analysis"), "run_analysis should be called after draft");
+    assert(!result.toolCalls.some((call) => call.tool === "run_code_check"), "run_code_check should stay disabled when autoCodeCheck is false");
+    assert(!result.toolCalls.some((call) => call.tool === "generate_report"), "generate_report should stay disabled when includeReport is false");
     assert(result.toolCalls.some((call) => call.tool === "draft_model" && Array.isArray(call.authorizedBySkillIds) && call.authorizedBySkillIds.length > 0), "draft_model should expose authorized skill ids");
     console.log("[ok] agent text-to-model draft orchestration");
   }
@@ -494,7 +512,7 @@ async function validateAgentOrchestration(context) {
     assert(beam.success === true, "double-span beam draft should succeed");
     assert(Array.isArray(beam.model?.elements) && beam.model.elements.length === 2, "double-span beam should have 2 elements");
 
-    const truss = await svc.runForcedExecution({
+    const truss = await svc.runChatOnly({
       message: "建立一个平面桁架，长度5m，10kN轴向荷载并计算",
       context: {
         userDecision: "allow_auto_decide",
@@ -599,6 +617,104 @@ async function validateAgentOrchestration(context) {
       fsModule.unlinkSync(artifact.path);
     }
     console.log("[ok] analyze code-check report closed loop");
+  }
+
+  {
+    const agentSource = fs.readFileSync(path.join(context.rootDir, 'backend', 'src', 'services', 'agent.ts'), 'utf8');
+    assert(
+      agentSource.includes('targetArtifact'),
+      'agent orchestration should route execution through targetArtifact planning',
+    );
+    assert(
+      agentSource.includes('projectPolicy'),
+      'agent orchestration should consume project-level execution policy',
+    );
+    assert(
+      agentSource.includes('pipelineScheduler'),
+      'agent orchestration should delegate to pipeline scheduler',
+    );
+    console.log("[ok] agent orchestration target-artifact terms");
+  }
+
+  {
+    const chatPath = path.join(context.rootDir, 'backend', 'src', 'api', 'chat.ts');
+    const chatSource = fs.readFileSync(chatPath, 'utf8');
+
+    const conversationPath = path.join(context.rootDir, 'backend', 'src', 'services', 'conversation.ts');
+    const conversationSource = fs.readFileSync(conversationPath, 'utf8');
+
+    assert(
+      chatSource.includes('projectId'),
+      '/api/v1/chat must accept projectId to align with /api/v1/agent/run',
+    );
+    assert(
+      conversationSource.includes('PROJECTION CACHE') || conversationSource.includes('projection cache'),
+      'conversation.ts must document that snapshots are projection caches, not pipeline truth',
+    );
+    console.log("[ok] chat projectId passthrough and snapshot boundary");
+  }
+
+  {
+    const { skillManifestFileSchema } = await import(
+      pathToFileURL(path.join(context.rootDir, 'backend', 'dist', 'agent-runtime', 'manifest-schema.js')).href
+    );
+    const { parse: parseYaml } = backendRequire(context.rootDir)('yaml');
+    const { existsSync, readdirSync, readFileSync } = require('node:fs');
+
+    function collectDirectories(root) {
+      const result = [];
+      const queue = [root];
+      while (queue.length > 0) {
+        const dir = queue.shift();
+        result.push(dir);
+        try {
+          const entries = readdirSync(dir, { withFileTypes: true });
+          for (const entry of entries) {
+            if (entry.isDirectory()) queue.push(path.join(dir, entry.name));
+          }
+        } catch { /* ignore */ }
+      }
+      return result;
+    }
+
+    const DOMAIN_ROLE_MAP = {
+      'structure-type': 'entry',
+      'data-input': 'entry',
+      'section': 'enricher',
+      'material': 'enricher',
+      'load-boundary': 'enricher',
+      'design': 'designer',
+      'validation': 'validator',
+      'analysis': 'provider',
+      'result-postprocess': 'transformer',
+      'code-check': 'provider',
+      'drawing': 'consumer',
+      'report-export': 'consumer',
+      'visualization': 'consumer',
+      'general': 'assistant',
+    };
+
+    const skillManifestRoot = path.join(context.rootDir, 'backend', 'src', 'agent-skills');
+    const dirs = collectDirectories(skillManifestRoot);
+    let checkedCount = 0;
+    for (const dir of dirs) {
+      const manifestPath = path.join(dir, 'skill.yaml');
+      if (!existsSync(manifestPath)) continue;
+      const parsed = skillManifestFileSchema.safeParse(parseYaml(readFileSync(manifestPath, 'utf8')));
+      if (!parsed.success) continue;
+      if (!parsed.data.runtimeContract) continue;
+      const expectedRole = DOMAIN_ROLE_MAP[parsed.data.domain];
+      assert(
+        parsed.data.runtimeContract.role === expectedRole,
+        `Skill ${parsed.data.id} in domain ${parsed.data.domain} must declare role ${expectedRole}, got ${parsed.data.runtimeContract.role}`,
+      );
+      checkedCount++;
+    }
+    assert(
+      checkedCount >= 1,
+      `At least 1 builtin skill must declare runtimeContract for domain-to-role validation (found ${checkedCount})`,
+    );
+    console.log(`[ok] domain-to-role mapping validation (${checkedCount} skills checked)`);
   }
 }
 
@@ -2503,9 +2619,11 @@ async function validateAgentCapabilityMatrix(context) {
   assert(payload.skillDomainById["dead-load"] === "load-boundary", "discoverable load-boundary skills should be exposed in skillDomainById");
   assert(payload.skillDomainById["section-common"] === "section", "discoverable section skills should be exposed in skillDomainById");
   assert(payload.skillDomainById["visualization-frame-summary"] === "visualization", "discoverable visualization skills should be exposed in skillDomainById");
+  assert(payload.skillDomainById["memory"] === "general", "discoverable general utility skills should be exposed in skillDomainById");
   assert(payload.skills.find((skill) => skill.id === "dead-load")?.runtimeStatus === "discoverable", "dead-load should be marked discoverable");
   assert(payload.skills.find((skill) => skill.id === "section-common")?.runtimeStatus === "discoverable", "section-common should be marked discoverable");
   assert(payload.skills.find((skill) => skill.id === "visualization-frame-summary")?.runtimeStatus === "discoverable", "visualization-frame-summary should be marked discoverable");
+  assert(payload.skills.find((skill) => skill.id === "memory")?.runtimeStatus === "discoverable", "memory should be marked discoverable");
   assert(domainSummaryById["structure-type"]?.runtimeStatus === "active", "structure-type domain should be active");
   assert(domainSummaryById["analysis"]?.runtimeStatus === "active", "analysis domain should be active");
   assert(domainSummaryById["validation"]?.runtimeStatus === "partial", "validation domain should be partial");
@@ -2513,15 +2631,17 @@ async function validateAgentCapabilityMatrix(context) {
   assert(domainSummaryById["section"]?.runtimeStatus === "discoverable", "section domain should remain discoverable while builtin skills exist");
   assert(domainSummaryById["load-boundary"]?.runtimeStatus === "discoverable", "load-boundary domain should remain discoverable while builtin skills exist");
   assert(domainSummaryById["visualization"]?.runtimeStatus === "discoverable", "visualization domain should remain discoverable while builtin skills exist");
-  assert(domainSummaryById["design"]?.runtimeStatus === "reserved", "design domain should be reserved when it has no runtime skill presence");
+  assert(domainSummaryById["general"]?.runtimeStatus === "discoverable", "general domain should be discoverable while builtin utility skills exist");
+  assert(domainSummaryById["design"]?.runtimeStatus === "partial", "design domain should be partial when design-builtin skill is present");
   assert(domainSummaryById["data-input"]?.runtimeStatus === "reserved", "data-input domain should be reserved when it has no runtime skill presence");
-  assert(domainSummaryById["drawing"]?.runtimeStatus === "reserved", "drawing domain should be reserved when it has no runtime skill presence");
-  assert(domainSummaryById["general"]?.runtimeStatus === "reserved", "general domain should be reserved when it has no runtime skill presence");
+  assert(domainSummaryById["drawing"]?.runtimeStatus === "discoverable", "drawing domain should be discoverable while builtin skills exist");
   assert(domainSummaryById["material"]?.runtimeStatus === "reserved", "material domain should be reserved when it has no runtime skill presence");
-  assert(domainSummaryById["result-postprocess"]?.runtimeStatus === "reserved", "result-postprocess domain should be reserved when it has no runtime skill presence");
+  assert(domainSummaryById["result-postprocess"]?.runtimeStatus === "active", "result-postprocess domain should be active when postprocess-builtin skill is present");
   assert(domainSummaryById["load-boundary"]?.skillIds.includes("dead-load"), "load-boundary summary should include discoverable builtin skills");
   assert(domainSummaryById["section"]?.skillIds.includes("section-common"), "section summary should include discoverable builtin skills");
   assert(domainSummaryById["visualization"]?.skillIds.includes("visualization-frame-summary"), "visualization summary should include discoverable builtin skills");
+  assert(domainSummaryById["general"]?.skillIds.includes("memory"), "general summary should include discoverable builtin utility skills");
+  assert(domainSummaryById["drawing"]?.skillIds.includes("pkpm-drawing"), "drawing summary should include discoverable builtin drawing skills");
   assert(Array.isArray(domainSummaryById["design"]?.skillIds), "design domain summary should exist even without runtime skills");
 
     const responseDynamic = await app.inject({ method: "GET", url: "/api/v1/agent/capability-matrix?analysisType=dynamic" });
@@ -2876,7 +2996,7 @@ async function validateAgentSkillhubRepositoryDown(context) {
   const result = await svc.runForcedExecution({
     message: "按3m悬臂梁端部10kN点荷载做静力分析",
     context: {
-      skillIds: ["beam"],
+      skillIds: ["beam", "opensees-static", "validation-structure-model"],
       model: {
         schema_version: "1.0.0",
         unit_system: "SI",
@@ -2887,7 +3007,7 @@ async function validateAgentSkillhubRepositoryDown(context) {
         elements: [{ id: "1", type: "beam", node_i: "1", node_j: "2", material: "mat1", section: "sec1" }],
         materials: [{ id: "mat1", type: "steel", E: 2.06e11, nu: 0.3, density: 7850 }],
         sections: [{ id: "sec1", type: "rectangular", width: 0.3, height: 0.6 }],
-        load_cases: [{ id: "LC1", type: "dead", loads: [{ type: "nodal", node: "2", fy: -10 }] }],
+        load_cases: [{ id: "LC1", type: "dead", loads: [{ type: "nodal", node: "2", fz: -10 }] }],
         load_combinations: [{ id: "ULS1", factors: [{ case: "LC1", factor: 1.0 }] }],
       },
       userDecision: "allow_auto_decide",
@@ -2909,15 +3029,135 @@ async function validateChatStreamContract(context) {
   await runBackendBuildOnce(context);
   const Fastify = backendRequire(context.rootDir)("fastify");
   const AgentService = await importBackendAgentService(context.rootDir);
+  const { prisma } = await import(pathToFileURL(path.join(context.rootDir, "backend", "dist", "utils", "database.js")).href);
+  const protocol = AgentService.getProtocol();
+
+  assert(
+    Array.isArray(protocol.streamEventSchema?.oneOf)
+      && protocol.streamEventSchema.oneOf.some((entry) => entry?.properties?.type?.const === "presentation_init"),
+    "stream schema should expose presentation_init",
+  );
+  assert(
+    Array.isArray(protocol.streamEventSchema?.oneOf)
+      && protocol.streamEventSchema.oneOf.some((entry) => entry?.properties?.type?.const === "phase_upsert"),
+    "stream schema should expose phase_upsert",
+  );
+  assert(
+    Array.isArray(protocol.streamEventSchema?.oneOf)
+      && protocol.streamEventSchema.oneOf.some((entry) => entry?.properties?.type?.const === "artifact_upsert"),
+    "stream schema should expose artifact_upsert",
+  );
+  assert(
+    Array.isArray(protocol.streamEventSchema?.oneOf)
+      && protocol.streamEventSchema.oneOf.some((entry) => entry?.properties?.type?.const === "artifact_payload_sync"),
+    "stream schema should expose artifact_payload_sync",
+  );
 
   let capturedTraceId;
+  let persistedAssistantMetadata;
   const originalRunStream = AgentService.prototype.runStream;
   const originalRunForcedExecutionStream = AgentService.prototype.runForcedExecutionStream;
+  const originalConversationFindFirst = prisma.conversation.findFirst;
+  const originalConversationUpdate = prisma.conversation.update;
+  const originalMessageFindMany = prisma.message.findMany;
+  const originalMessageCreateMany = prisma.message.createMany;
   const mockRunStream = async function* mockRunStream(params) {
     const request = params;
     capturedTraceId = request.traceId;
     const traceId = "stream-trace-001";
     yield { type: "start", content: { traceId, conversationId: "conv-stream-001", startedAt: "2026-03-09T00:00:00.000Z" } };
+    yield {
+      type: "presentation_init",
+      presentation: {
+        version: 3,
+        mode: "execution",
+        status: "streaming",
+        summaryText: "",
+        phases: [],
+        artifacts: [],
+        traceId,
+        startedAt: "2026-03-09T00:00:00.000Z",
+      },
+    };
+    yield {
+      type: "phase_upsert",
+      phase: {
+        phaseId: "phase:modeling",
+        phase: "modeling",
+        title: "建模阶段",
+        status: "running",
+        steps: [],
+      },
+    };
+    yield {
+      type: "step_upsert",
+      step: {
+        id: "step:draft_model:2026-03-09T00:00:00.002Z",
+        phase: "modeling",
+        status: "done",
+        tool: "draft_model",
+        title: "已选择建模技能",
+        reason: "routing",
+        startedAt: "2026-03-09T00:00:00.002Z",
+      },
+      phaseId: "phase:modeling",
+    };
+    yield {
+      type: "step_upsert",
+      phaseId: "phase:modeling",
+      step: {
+        id: "step:draft_model:2026-03-09T00:00:00.003Z",
+        phase: "modeling",
+        tool: "draft_model",
+        status: "running",
+        title: "开始生成结构模型",
+        reason: "draft model",
+        startedAt: "2026-03-09T00:00:00.003Z",
+      },
+    };
+    yield {
+      type: "step_upsert",
+      phaseId: "phase:understanding",
+      step: {
+        id: "step:clarify:2026-03-09T00:00:00.004Z",
+        phase: "understanding",
+        status: "done",
+        title: "Need more modeling details",
+        errorMessage: "Please provide the span and support conditions.",
+        startedAt: "2026-03-09T00:00:00.004Z",
+      },
+    };
+    yield {
+      type: "artifact_upsert",
+      artifact: {
+        artifact: "model",
+        status: "available",
+        title: "结构模型",
+        previewable: true,
+        snapshotKey: "modelSnapshot",
+      },
+    };
+    yield {
+      type: "artifact_payload_sync",
+      artifact: "model",
+      model: { schema_version: "1.0.0" },
+    };
+    yield {
+      type: "step_upsert",
+      phaseId: "phase:modeling",
+      step: {
+        id: "step:draft_model:2026-03-09T00:00:00.015Z",
+        phase: "modeling",
+        tool: "draft_model",
+        status: "done",
+        title: "结构模型已生成",
+        output: { model: { schema_version: "1.0.0" } },
+        startedAt: "2026-03-09T00:00:00.015Z",
+        completedAt: "2026-03-09T00:00:00.030Z",
+        durationMs: 15,
+      },
+    };
+    yield { type: "summary_replace", summaryText: "ok" };
     yield {
       type: "result",
       content: {
@@ -2930,7 +3170,25 @@ async function validateChatStreamContract(context) {
         orchestrationMode: "llm-planned",
         needsModelInput: false,
         plan: ["validate_model", "run_analysis", "generate_report"],
-        toolCalls: [],
+        routing: {
+          selectedSkillIds: ["frame"],
+          activatedSkillIds: ["frame"],
+          structuralSkillId: "frame",
+          analysisSkillId: "analysis-static",
+        },
+        toolCalls: [
+          {
+            tool: "draft_model",
+            status: "success",
+            startedAt: "2026-03-09T00:00:00.015Z",
+            completedAt: "2026-03-09T00:00:00.030Z",
+            durationMs: 15,
+            output: {
+              model: { schema_version: "1.0.0" },
+            },
+          },
+        ],
+        model: { schema_version: "1.0.0" },
         response: "ok",
       },
     };
@@ -2938,6 +3196,13 @@ async function validateChatStreamContract(context) {
   };
   AgentService.prototype.runStream = mockRunStream;
   AgentService.prototype.runForcedExecutionStream = mockRunStream;
+  prisma.conversation.findFirst = async () => ({ id: "conv-stream-001" });
+  prisma.conversation.update = async () => ({ id: "conv-stream-001" });
+  prisma.message.findMany = async () => [];
+  prisma.message.createMany = async ({ data }) => {
+    persistedAssistantMetadata = data.find((entry) => entry.role === "assistant")?.metadata;
+    return { count: Array.isArray(data) ? data.length : 0 };
+  };
 
   const parseSseEvents = (raw) =>
     raw
@@ -2976,9 +3241,24 @@ async function validateChatStreamContract(context) {
       .filter((item) => item !== "[DONE]")
       .map((item) => JSON.parse(item));
     assert(chunks[0].type === "start", "first chunk should be start");
+    assert(chunks.some((chunk) => chunk.type === "presentation_init"), "stream should contain presentation_init chunk");
+    assert(chunks.some((chunk) => chunk.type === "phase_upsert"), "stream should contain phase_upsert chunk");
+    assert(chunks.some((chunk) => chunk.type === "artifact_upsert"), "stream should contain artifact_upsert chunk");
+    assert(chunks.some((chunk) => chunk.type === "artifact_payload_sync"), "stream should contain artifact_payload_sync chunk");
+    assert(chunks.some((chunk) => chunk.type === "step_upsert" && chunk.phaseId === "phase:modeling"), "stream should contain phase-scoped step chunk");
     assert(chunks.some((chunk) => chunk.type === "result"), "stream should contain result chunk");
     assert(chunks[chunks.length - 1].type === "done", "last chunk before [DONE] should be done");
     assert(capturedTraceId === "trace-stream-request-1", "chat/stream should pass traceId to agent stream");
+    assert(persistedAssistantMetadata?.presentation?.version === 3, "chat/stream should persist assistant presentation metadata");
+    assert(
+      persistedAssistantMetadata?.presentation?.summaryText === "ok",
+      "chat/stream should persist the latest summaryText inside assistant presentation metadata",
+    );
+    assert(
+      Array.isArray(persistedAssistantMetadata?.presentation?.phases)
+        && persistedAssistantMetadata.presentation.phases.some((phase) => phase.phase === "modeling" && phase.steps.some((step) => step.tool === "draft_model")),
+      "chat/stream should persist modeling steps inside assistant presentation metadata",
+    );
 
     const startTrace = chunks.find((chunk) => chunk.type === "start")?.content?.traceId;
     const resultTrace = chunks.find((chunk) => chunk.type === "result")?.content?.traceId;
@@ -3001,6 +3281,10 @@ async function validateChatStreamContract(context) {
   } finally {
     AgentService.prototype.runStream = originalRunStream;
     AgentService.prototype.runForcedExecutionStream = originalRunForcedExecutionStream;
+    prisma.conversation.findFirst = originalConversationFindFirst;
+    prisma.conversation.update = originalConversationUpdate;
+    prisma.message.findMany = originalMessageFindMany;
+    prisma.message.createMany = originalMessageCreateMany;
     if (app) {
       await app.close();
     }
@@ -3208,6 +3492,7 @@ async function validateReportNarrativeContract(context) {
   const result = await svc.runWithStrategy({
     message: "请分析并按规范校核后出报告",
     context: {
+      skillIds: ["beam", "opensees-static", "validation-structure-model", "report-export-builtin", "code-check-gb50017", "postprocess-builtin"],
       model: {
         schema_version: "1.0.0",
         nodes: [
@@ -3251,16 +3536,19 @@ async function validateReportNarrativeContract(context) {
 async function validateDevStartupGuards(context) {
   const cliMainPath = path.join(context.rootDir, "scripts", "cli", "main.js");
   const cliMainContent = await fsp.readFile(cliMainPath, "utf8");
+  const cliRuntimePath = path.join(context.rootDir, "scripts", "cli", "runtime.js");
   const linuxNodeInstallerPath = path.join(context.rootDir, "scripts", "install-node-linux.sh");
   const windowsNodeInstallerPath = path.join(context.rootDir, "scripts", "install-node-windows.ps1");
   const readmePath = path.join(context.rootDir, "README.md");
   const readmeCnPath = path.join(context.rootDir, "README_CN.md");
   const [
+    cliRuntimeContent,
     linuxNodeInstallerContent,
     windowsNodeInstallerContent,
     readmeContent,
     readmeCnContent,
   ] = await Promise.all([
+    fsp.readFile(cliRuntimePath, "utf8"),
     fsp.readFile(linuxNodeInstallerPath, "utf8"),
     fsp.readFile(windowsNodeInstallerPath, "utf8"),
     fsp.readFile(readmePath, "utf8"),
@@ -3291,6 +3579,22 @@ async function validateDevStartupGuards(context) {
   assert(
     cliMainContent.includes("appendSessionHeader"),
     "missing log session isolation hook in unified CLI",
+  );
+  assert(
+    cliMainContent.includes("getPortCleanupOptions"),
+    "missing scoped port cleanup options in unified CLI",
+  );
+  assert(
+    cliMainContent.includes("SCLAW_FORCE_PORT_CLEANUP"),
+    "missing opt-in untracked port cleanup guard in unified CLI",
+  );
+  assert(
+    cliRuntimeContent.includes("normalizePortNumber"),
+    "missing port sanitization in CLI runtime cleanup",
+  );
+  assert(
+    cliRuntimeContent.includes("isProjectOwnedPortProcess"),
+    "missing project ownership guard in CLI runtime cleanup",
   );
   assert(
     cliMainContent.includes("persistDockerEnv"),

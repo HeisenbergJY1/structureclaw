@@ -1,3 +1,4 @@
+import type { ExecutionRequestOptions } from '../agent-skills/analysis/types.js';
 import { PythonWorkerRunner, resolveWorkerPath } from '../utils/python-worker-runner.js';
 
 export type StructureProtocolAction =
@@ -12,12 +13,13 @@ export interface StructureProtocolExecutionInput {
 }
 
 export interface LocalStructureProtocolClient {
-  post<T = any>(path: string, payload?: Record<string, unknown>): Promise<{ data: T }>;
+  post<T = any>(path: string, payload?: Record<string, unknown>, requestOptions?: ExecutionRequestOptions): Promise<{ data: T }>;
   get<T = any>(path: string): Promise<{ data: T }>;
 }
 
 const LOCAL_GET_PATHS: Record<string, StructureProtocolAction> = {
   '/schema/structure-model-v1': 'structure_model_schema',
+  '/schema/structure-model-v2': 'structure_model_schema',
   '/schema/converters': 'converter_schema',
 };
 
@@ -39,12 +41,12 @@ export class StructureProtocolExecutionService {
     return this.runner.invoke({ action: 'converter_schema' });
   }
 
-  async validate(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return this.runner.invoke({ action: 'validate', input: payload });
+  async validate(payload: Record<string, unknown>, requestOptions?: ExecutionRequestOptions): Promise<Record<string, unknown>> {
+    return this.runner.invoke({ action: 'validate', input: payload }, requestOptions);
   }
 
-  async convert(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return this.runner.invoke({ action: 'convert', input: payload });
+  async convert(payload: Record<string, unknown>, requestOptions?: ExecutionRequestOptions): Promise<Record<string, unknown>> {
+    return this.runner.invoke({ action: 'convert', input: payload }, requestOptions);
   }
 }
 
@@ -72,16 +74,16 @@ export function createLocalStructureProtocolClient(
           throw buildError(`Unsupported local GET action: ${String(action)}`, 400);
       }
     },
-    async post<T = unknown>(path: string, payload: Record<string, unknown> = {}): Promise<{ data: T }> {
+    async post<T = unknown>(path: string, payload: Record<string, unknown> = {}, requestOptions?: ExecutionRequestOptions): Promise<{ data: T }> {
       const action = LOCAL_POST_PATHS[path];
       if (!action) {
         throw buildError(`Unsupported local POST path: ${path}`, 400);
       }
       switch (action) {
         case 'validate':
-          return { data: await service.validate(payload) as T };
+          return { data: await service.validate(payload, requestOptions) as T };
         case 'convert':
-          return { data: await service.convert(payload) as T };
+          return { data: await service.convert(payload, requestOptions) as T };
         default:
           throw buildError(`Unsupported local POST action: ${String(action)}`, 400);
       }

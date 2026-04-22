@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { API_BASE } from '@/lib/api-base'
 import { loadCapabilityPreferences, saveCapabilityPreferences } from '@/lib/capability-preference'
-import { ALL_SKILL_DOMAINS, buildSkillNormalizationContext, type SkillDomain, type SkillMetadataLike } from '@/lib/skill-normalization'
+import { ALL_SKILL_DOMAINS, buildSkillNormalizationContext, DEFAULT_CONSOLE_SKILL_IDS, normalizeSkillDomain, type SkillDomain, type SkillMetadataLike } from '@/lib/skill-normalization'
 import { useI18n, type MessageKey } from '@/lib/i18n'
 import type { AppLocale } from '@/lib/stores/slices/preferences'
 import { cn } from '@/lib/utils'
@@ -14,6 +14,9 @@ import { cn } from '@/lib/utils'
 type AgentSkillSummary = SkillMetadataLike & {
   name: { zh?: string; en?: string }
   description: { zh?: string; en?: string }
+  domain?: string
+  structureType?: string
+  stages?: string[]
 }
 
 type ToolCategory = 'modeling' | 'analysis' | 'code-check' | 'report' | 'utility'
@@ -52,6 +55,20 @@ type CapabilityMatrixPayload = {
 }
 
 const ALL_TOOL_CATEGORIES: ToolCategory[] = ['modeling', 'analysis', 'code-check', 'report', 'utility']
+
+/** Infer domain from skill id when capability-matrix is unavailable. */
+function inferDomainFromSkillId(id: string): SkillDomain {
+  if (id.startsWith('code-check-')) return 'code-check'
+  if (id.startsWith('visualization-')) return 'visualization'
+  if (id.startsWith('opensees-') || id.startsWith('simplified-')) return 'analysis'
+  if (id === 'load-combination' || id === 'boundary-condition' || id.endsWith('-load')) return 'load-boundary'
+  if (id === 'structure-json') return 'validation'
+  if (id === 'png-export') return 'report-export'
+  if (id === 'generic') return 'general'
+  if (['beam', 'double-span-beam', 'frame', 'portal-frame', 'truss'].includes(id)) return 'structure-type'
+  return 'general'
+}
+
 
 function normalizeToolCategory(value: unknown): ToolCategory {
   if (value === 'modeling' || value === 'analysis' || value === 'code-check' || value === 'report' || value === 'utility') {
@@ -116,9 +133,6 @@ function resolveCallableTools(
   selectedSkillIds.forEach((skillId) => {
     const toolIds = enabledToolIdsBySkill[skillId]
     if (!Array.isArray(toolIds)) {
-      if (skillDomainById[skillId] === 'structure-type') {
-        callableToolIds.add('validate_model')
-      }
       return
     }
     toolIds.forEach((toolId) => {
@@ -126,30 +140,9 @@ function resolveCallableTools(
         callableToolIds.add(toolId)
       }
     })
-    if (skillDomainById[skillId] === 'structure-type') {
-      callableToolIds.add('validate_model')
-    }
   })
 
   const toolById = new Map(matrixTools.map((tool) => [tool.id, tool]))
-  const queue = [...callableToolIds]
-  while (queue.length > 0) {
-    const toolId = queue.shift()
-    if (!toolId) {
-      continue
-    }
-    const tool = toolById.get(toolId)
-    if (!tool || !Array.isArray(tool.requiresTools)) {
-      continue
-    }
-    tool.requiresTools.forEach((requiredToolId) => {
-      if (typeof requiredToolId !== 'string' || requiredToolId.trim().length === 0 || callableToolIds.has(requiredToolId)) {
-        return
-      }
-      callableToolIds.add(requiredToolId)
-      queue.push(requiredToolId)
-    })
-  }
 
   return matrixTools.filter((tool) => callableToolIds.has(tool.id))
 }
@@ -198,7 +191,7 @@ export function CapabilitySettingsPanel() {
 
   const defaultSelectedSkillIds = useMemo(() => {
     const available = new Set(availableSkills.map((skill) => skill.id))
-    return ['opensees-static', 'generic'].filter((skillId) => available.has(skillId))
+    return [...DEFAULT_CONSOLE_SKILL_IDS].filter((skillId) => available.has(skillId))
   }, [availableSkills])
 
   const initialDefaultToolIds = useMemo(
@@ -294,7 +287,7 @@ export function CapabilitySettingsPanel() {
       setSelectedToolIds(initialDefaultToolIds)
     }
     preferencesHydratedRef.current = true
-  }, [availableSkills, baseCallableToolIds, capabilityMatrixLoaded, defaultSelectedSkillIds, initialDefaultToolIds, skillDomainById, skillNormalization, skillsLoaded])
+  }, [availableSkills, baseCallableToolIds, capabilityMatrix, capabilityMatrixLoaded, defaultSelectedSkillIds, initialDefaultToolIds, skillDomainById, skillNormalization, skillsLoaded])
 
   useEffect(() => {
     if (!preferencesHydratedRef.current) {
@@ -312,7 +305,9 @@ export function CapabilitySettingsPanel() {
   const groupedSkills = useMemo(() => {
     const bucket = new Map<SkillDomain, AgentSkillSummary[]>()
     availableSkills.forEach((skill) => {
-      const domain = skillDomainById[skill.id] || 'unknown'
+      const domain = skillDomainById[skill.id]
+        || normalizeSkillDomain(skill.domain)
+        || inferDomainFromSkillId(skill.id)
       const list = bucket.get(domain) || []
       list.push(skill)
       bucket.set(domain, list)
@@ -514,6 +509,9 @@ export function CapabilitySettingsPanel() {
               </select>
             </div>
             <div className="space-y-3">
+              {visibleGroupedSkills.length === 0 && (
+                <p className="text-xs text-muted-foreground">{t('skillDomainNoInstalledSkills')}</p>
+              )}
               {visibleGroupedSkills.map((group) => {
                 const allSelected = group.skills.length > 0 && group.selectedCount === group.skills.length
                 return (

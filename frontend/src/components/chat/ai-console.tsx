@@ -1,10 +1,11 @@
 'use client'
 
 import dynamic from 'next/dynamic'
+import { createPortal } from 'react-dom'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
-import ReactMarkdown from 'react-markdown'
-import { ArrowUp, Bot, BrainCircuit, Clock3, Cuboid, FileText, Loader2, MessageSquarePlus, Orbit, Sparkles, Trash2, User } from 'lucide-react'
+import { MarkdownBody } from './markdown-body'
+import { ArrowUp, Bot, BrainCircuit, Clock3, Cuboid, FileText, Loader2, Maximize2, MessageSquarePlus, Orbit, RefreshCw, Sparkles, Square, Trash2, User } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -14,10 +15,19 @@ import { toast } from '@/components/ui/toast'
 import { buildVisualizationSnapshot } from '@/components/visualization/adapter'
 import type { VisualizationSnapshot } from '@/components/visualization/types'
 import { useI18n, type MessageKey } from '@/lib/i18n'
+import {
+  MessagePresentationView,
+  reducePresentationEvent,
+  type AssistantPresentation,
+  type TimelinePhaseGroup,
+  type TimelineStepItem,
+  type PresentationArtifactState,
+  type PresentationEvent,
+} from './message-presentation'
 import type { AppLocale } from '@/lib/stores/slices/preferences'
 import { API_BASE } from '@/lib/api-base'
 import { loadCapabilityPreferences, saveCapabilityPreferences } from '@/lib/capability-preference'
-import { ALL_SKILL_DOMAINS, buildSkillNormalizationContext, type SkillDomain, type SkillMetadataLike } from '@/lib/skill-normalization'
+import { ALL_SKILL_DOMAINS, buildSkillNormalizationContext, DEFAULT_CONSOLE_SKILL_IDS, type SkillDomain, type SkillMetadataLike } from '@/lib/skill-normalization'
 import { cn, formatDate, formatNumber } from '@/lib/utils'
 
 const StructuralVisualizationModal = dynamic(
@@ -32,9 +42,10 @@ type Message = {
   id: string
   role: 'user' | 'assistant'
   content: string
-  status?: 'streaming' | 'done' | 'error'
+  status?: 'streaming' | 'done' | 'error' | 'aborted'
   timestamp: string
   debugDetails?: MessageDebugDetails
+  presentation?: AssistantPresentation
 }
 
 type AgentToolCall = {
@@ -65,6 +76,9 @@ type MessageDebugDetails = {
 
 type MessageMetadata = {
   debugDetails?: MessageDebugDetails
+  status?: 'done' | 'error' | 'aborted'
+  traceId?: string
+  presentation?: AssistantPresentation
 }
 
 type AgentInteraction = {
@@ -89,6 +103,7 @@ type AgentResult = {
   report?: {
     summary?: string
     markdown?: string
+    json?: Record<string, unknown>
   }
   clarification?: {
     question?: string
@@ -101,15 +116,37 @@ type AgentResult = {
   durationMs?: number
   requestedEngineId?: string
   routing?: MessageDebugDetails['routing']
+  visualizationHints?: Record<string, unknown>
 }
 
 type StreamPayload =
   | { type: 'start'; content?: { traceId?: string; conversationId?: string; startedAt?: string } }
   | { type: 'token'; content?: string }
   | { type: 'interaction_update'; content?: AgentInteraction }
+  | { type: 'presentation_init'; presentation?: AssistantPresentation }
+  | { type: 'phase_upsert'; phase?: TimelinePhaseGroup }
+  | { type: 'step_upsert'; phaseId?: string; step?: TimelineStepItem }
+  | { type: 'artifact_upsert'; artifact?: PresentationArtifactState }
+  | { type: 'artifact_payload_sync'; artifact?: 'model' | 'analysis' | 'report'; model?: Record<string, unknown>; latestResult?: AgentResult; snapshot?: VisualizationSnapshot }
+  | { type: 'summary_replace'; summaryText?: string }
+  | { type: 'presentation_complete'; completedAt?: string }
+  | { type: 'presentation_error'; phase?: string; message?: string }
   | { type: 'result'; content?: AgentResult }
   | { type: 'done' }
   | { type: 'error'; error?: string }
+
+type StreamSession = {
+  conversationId: string
+  status: 'streaming' | 'completed' | 'aborted'
+  abortController: AbortController
+  assistantMessageId: string
+  reader: ReadableStreamDefaultReader<Uint8Array> | null
+}
+
+type VisualizationHintsPayload = {
+  memberUtilizationMap?: Record<string, number>
+  bucklingModes?: Array<{ lambda: number; modeShape: Record<string, [number, number, number]> }>
+}
 
 type ConversationSummary = {
   id: string
@@ -141,6 +178,7 @@ type ConversationDetail = ConversationSummary & {
     modelSnapshot?: VisualizationSnapshot | null
     resultSnapshot?: VisualizationSnapshot | null
     latestResult?: AgentResult | null
+    staleStructuralData?: boolean
   } | null
 }
 
@@ -169,6 +207,35 @@ async function saveConversationSnapshotToBackend(
   }
 }
 
+async function saveConversationMessagesToBackend(
+  conversationId: string,
+  params: {
+    userMessage: string
+    assistantContent: string
+    assistantAborted?: boolean
+    traceId?: string
+    assistantPresentation?: AssistantPresentation
+  }
+): Promise<void> {
+  if (!conversationId) return
+
+  try {
+    await fetch(`${API_BASE}/api/v1/chat/conversation/${conversationId}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userMessage: params.userMessage,
+        assistantContent: params.assistantContent,
+        assistantAborted: params.assistantAborted,
+        traceId: params.traceId,
+        assistantPresentation: params.assistantPresentation,
+      }),
+    })
+  } catch (error) {
+    console.warn('Failed to save messages to backend:', error);
+  }
+}
+
 type PersistedConversation = ConversationSummary & {
   messages: Message[]
   modelText?: string
@@ -183,6 +250,7 @@ type PersistedConversation = ConversationSummary & {
   modelVisualizationSnapshot?: VisualizationSnapshot | null
   resultVisualizationSnapshot?: VisualizationSnapshot | null
   visualizationSnapshot?: VisualizationSnapshot | null
+  staleStructuralData?: boolean
 }
 
 type AgentSkillSummary = SkillMetadataLike & {
@@ -192,6 +260,7 @@ type AgentSkillSummary = SkillMetadataLike & {
   stages?: string[]
   triggers?: string[]
   autoLoadByDefault?: boolean
+  domain?: string
 }
 
 type CapabilitySkillSummary = {
@@ -231,7 +300,8 @@ type CapabilityMatrixPayload = {
   skillAliasesByCanonicalId?: Record<string, string[]>
 }
 
-const DEFAULT_CONSOLE_SKILL_IDS = ['opensees-static', 'generic'] as const
+
+
 
 function resolveCallableTools(
   matrix: CapabilityMatrixPayload | null,
@@ -439,6 +509,185 @@ function parsePersistedDebugDetails(metadata: unknown): MessageDebugDetails | un
   }
 }
 
+function parsePersistedPresentation(metadata: unknown): AssistantPresentation | undefined {
+  const metadataRecord = toObjectRecord(metadata)
+  const presentationRecord = toObjectRecord(metadataRecord?.presentation)
+  if (!presentationRecord) {
+    return undefined
+  }
+
+  const status = presentationRecord.status === 'done'
+    || presentationRecord.status === 'error'
+    || presentationRecord.status === 'aborted'
+    || presentationRecord.status === 'streaming'
+    ? presentationRecord.status
+    : 'done'
+  const mode = presentationRecord.mode === 'conversation' ? 'conversation' : 'execution'
+  const summaryText = typeof presentationRecord.summaryText === 'string' ? presentationRecord.summaryText : ''
+  const traceId = typeof presentationRecord.traceId === 'string' ? presentationRecord.traceId : undefined
+  const startedAt = typeof presentationRecord.startedAt === 'string' ? presentationRecord.startedAt : undefined
+  const completedAt = typeof presentationRecord.completedAt === 'string' ? presentationRecord.completedAt : undefined
+  const errorMessage = typeof presentationRecord.errorMessage === 'string' ? presentationRecord.errorMessage : undefined
+
+  const artifacts = Array.isArray(presentationRecord.artifacts)
+    ? presentationRecord.artifacts.filter((item): item is PresentationArtifactState => Boolean(item && typeof item === 'object'))
+    : []
+
+  // Only v3 format is supported — use phases if present, otherwise degrade gracefully
+  if (presentationRecord.version === 3 && Array.isArray(presentationRecord.phases)) {
+    const phases: TimelinePhaseGroup[] = presentationRecord.phases
+      .filter((p): p is Record<string, unknown> => Boolean(p && typeof p === 'object'))
+      .map((p): TimelinePhaseGroup => ({
+        phaseId: typeof p.phaseId === 'string' ? p.phaseId : `phase:${p.phase ?? 'modeling'}`,
+        phase: (typeof p.phase === 'string' ? p.phase : 'modeling') as 'understanding' | 'modeling' | 'validation' | 'analysis' | 'report',
+        title: typeof p.title === 'string' ? p.title : undefined,
+        status: (typeof p.status === 'string' ? p.status : 'done') as 'pending' | 'running' | 'done' | 'error',
+        steps: Array.isArray(p.steps) ? p.steps as TimelineStepItem[] : [],
+        startedAt: typeof p.startedAt === 'string' ? p.startedAt : undefined,
+        completedAt: typeof p.completedAt === 'string' ? p.completedAt : undefined,
+      }))
+    return {
+      version: 3,
+      mode,
+      status,
+      summaryText,
+      phases,
+      artifacts,
+      traceId,
+      startedAt,
+      completedAt,
+      errorMessage,
+    }
+  }
+
+  // Legacy v1/v2 data — keep summary only, drop incompatible phase data
+  return {
+    version: 3,
+    mode,
+    status,
+    summaryText,
+    phases: [],
+    artifacts,
+    traceId,
+    startedAt,
+    completedAt,
+    errorMessage,
+  }
+}
+
+const LEGACY_ABORTED_SUFFIX_PATTERNS = [
+  /\n\n---\n\*(?:Stream stopped|已停止)\*$/u,
+  /（已停止）$/u,
+] as const
+
+function stripLegacyAbortedSuffix(content: string) {
+  return LEGACY_ABORTED_SUFFIX_PATTERNS.reduce((current, pattern) => current.replace(pattern, ''), content)
+}
+
+function hasLegacyAbortedSuffix(content: string) {
+  return LEGACY_ABORTED_SUFFIX_PATTERNS.some((pattern) => pattern.test(content))
+}
+
+function parsePersistedMessageStatus(metadata: unknown, content: string): Message['status'] {
+  const metadataRecord = toObjectRecord(metadata)
+  const rawStatus = metadataRecord?.status
+
+  if (rawStatus === 'aborted' || rawStatus === 'error' || rawStatus === 'done') {
+    return rawStatus
+  }
+  if (rawStatus === 'streaming') {
+    return 'aborted'
+  }
+  if (hasLegacyAbortedSuffix(content)) {
+    return 'aborted'
+  }
+  return 'done'
+}
+
+function normalizePersistedMessage(message: Message): Message {
+  const normalizedStatus = message.status === 'streaming'
+    ? 'aborted'
+    : (message.status ?? (hasLegacyAbortedSuffix(message.content) ? 'aborted' : 'done'))
+  const normalizedPresentation = message.presentation
+    ? {
+        ...message.presentation,
+        status: message.presentation.status === 'streaming' && normalizedStatus === 'aborted'
+          ? 'aborted'
+          : message.presentation.status,
+        summaryText: message.presentation.summaryText || stripLegacyAbortedSuffix(message.content),
+      }
+    : undefined
+
+  return {
+    ...message,
+    content: stripLegacyAbortedSuffix(message.content),
+    status: normalizedStatus,
+    presentation: normalizedPresentation,
+  }
+}
+
+function resolveAbortedAssistantContent(content: string, assistantSeed: string) {
+  return content.trim() === assistantSeed.trim() ? '' : content
+}
+
+const RESUME_MESSAGE_INTENTS = new Set([
+  '继续',
+  '继续吧',
+  '继续分析',
+  '继续执行',
+  '开始',
+  '开始吧',
+  '开始分析',
+  '开始计算',
+  '可以了',
+  '就这样',
+  '确认',
+  '确认执行',
+  'continue',
+  'goahead',
+  'proceed',
+  'start',
+  'startnow',
+  'runit',
+  'confirm',
+])
+
+function inferProceedIntent(message: string) {
+  const normalized = message
+    .trim()
+    .toLowerCase()
+    .replace(/[\s。．.!！?？,，;；:：'"`]+/gu, '')
+
+  return normalized.length > 0 && RESUME_MESSAGE_INTENTS.has(normalized)
+}
+
+function resolveResumeFromMessage(messages: Message[], input: string) {
+  if (!inferProceedIntent(input)) {
+    return undefined
+  }
+
+  const lastAssistantIndex = [...messages].map((message, index) => ({ message, index }))
+    .reverse()
+    .find(({ message }) => message.role === 'assistant')?.index
+
+  if (lastAssistantIndex === undefined || messages[lastAssistantIndex]?.status !== 'aborted') {
+    return undefined
+  }
+
+  for (let index = lastAssistantIndex - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (message.role !== 'user') {
+      continue
+    }
+    const content = message.content.trim()
+    if (content) {
+      return content
+    }
+  }
+
+  return undefined
+}
+
 function buildMessageDebugDetails(promptSnapshot: string, skillIds: string[], toolIds: string[], result: AgentResult): MessageDebugDetails {
   const safeToolCalls = normalizeToolCalls(result.toolCalls)
 
@@ -480,7 +729,7 @@ function toModelFromVisualizationSnapshot(snapshot?: VisualizationSnapshot | nul
   }
 
   const model: Record<string, unknown> = {
-    schema_version: '1.0.0',
+    schema_version: '2.0.0',
     nodes: snapshot.nodes.map((node) => ({
       id: node.id,
       x: node.position.x,
@@ -495,6 +744,14 @@ function toModelFromVisualizationSnapshot(snapshot?: VisualizationSnapshot | nul
       ...(typeof element.material === 'string' ? { material: element.material } : {}),
       ...(typeof element.section === 'string' ? { section: element.section } : {}),
     })),
+  }
+
+  if (snapshot.coordinateSemantics === 'global-z-up') {
+    model.metadata = {
+      coordinateSemantics: 'global-z-up',
+      frameDimension: snapshot.dimension === 3 ? '3d' : '2d',
+      source: 'visualization-snapshot',
+    }
   }
 
   if (Array.isArray(snapshot.loads) && snapshot.loads.length > 0) {
@@ -543,25 +800,7 @@ function loadConversationArchive(): Record<string, PersistedConversation> {
     const migrated: Record<string, PersistedConversation> = {}
 
     Object.entries(parsed as Record<string, PersistedConversation>).forEach(([conversationId, value]) => {
-      const archived = value as PersistedConversation
-      const normalizedLatestResult = normalizeAgentResultPayload(archived.latestResult || null)
-      const preferredStoredResultSnapshot = pickPreferredResultSnapshot(
-        archived.resultVisualizationSnapshot,
-        archived.visualizationSnapshot
-      )
-      const synthesizedResultSnapshot = buildResultSnapshotFromResult(
-        normalizedLatestResult,
-        archived.title || 'Conversation',
-        toModelFromVisualizationSnapshot(archived.modelVisualizationSnapshot || preferredStoredResultSnapshot)
-      )
-      const repairedResultSnapshot = pickPreferredResultSnapshot(preferredStoredResultSnapshot, synthesizedResultSnapshot)
-
-      migrated[conversationId] = {
-        ...archived,
-        latestResult: normalizedLatestResult,
-        resultVisualizationSnapshot: repairedResultSnapshot,
-        visualizationSnapshot: repairedResultSnapshot || archived.visualizationSnapshot || null,
-      }
+      migrated[conversationId] = sanitizePersistedConversation(value as PersistedConversation)
     })
 
     return migrated
@@ -670,6 +909,31 @@ function extractAnalysis(result: AgentResult | null) {
   return null
 }
 
+function extractVisualizationHints(result: AgentResult | null): VisualizationHintsPayload | null {
+  if (!result) {
+    return null
+  }
+
+  const normalized = normalizeAgentResultPayload(result)
+  if (!normalized) {
+    return null
+  }
+
+  const directHints = toObjectRecord(normalized.visualizationHints)
+  if (directHints) {
+    return directHints as VisualizationHintsPayload
+  }
+
+  const reportRecord = toObjectRecord(normalized.report)
+  const reportJson = toObjectRecord(reportRecord?.json)
+  const jsonHints = toObjectRecord(reportJson?.visualizationHints)
+  if (jsonHints) {
+    return jsonHints as VisualizationHintsPayload
+  }
+
+  return null
+}
+
 function hasAnalysisPayload(result: AgentResult | null | undefined) {
   return Boolean(extractAnalysis(result ?? null))
 }
@@ -706,6 +970,84 @@ function buildVisualizationTitle(result: AgentResult | null, conversationTitle: 
 
 function buildModelVisualizationTitle(baseTitle: string, t: (key: MessageKey) => string) {
   return `${baseTitle} · ${t('visualizationSourceModel')}`
+}
+
+const CANONICAL_COORDINATE_SEMANTICS = 'global-z-up'
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null
+}
+
+function isStaleVisualizationSnapshot(snapshot?: VisualizationSnapshot | null) {
+  if (!snapshot) return false
+  // Only flag as stale if the snapshot actually contains structural model data
+  // (non-trivial nodes and elements). Snapshots without structural data (e.g. empty
+  // or chat-only conversations) must not trigger the stale-data wipe.
+  if (!Array.isArray(snapshot.nodes) || snapshot.nodes.length === 0) return false
+  if (!Array.isArray(snapshot.elements) || snapshot.elements.length === 0) return false
+  return snapshot.coordinateSemantics !== CANONICAL_COORDINATE_SEMANTICS
+}
+
+function isStaleStructuralResult(result: AgentResult | null | undefined) {
+  const normalized = normalizeAgentResultPayload(result ?? null)
+  const model = asRecord(normalized?.model)
+  if (!model) {
+    return false
+  }
+  if (!Array.isArray(model.nodes) || !Array.isArray(model.elements)) {
+    return false
+  }
+  const metadata = asRecord(model.metadata)
+  const inferredType = typeof metadata?.inferredType === 'string' ? metadata.inferredType : undefined
+  if (inferredType === 'unknown') {
+    return false
+  }
+  return metadata?.coordinateSemantics !== CANONICAL_COORDINATE_SEMANTICS
+}
+
+function sanitizePersistedConversation(archived: PersistedConversation): PersistedConversation {
+  const normalizedMessages = Array.isArray(archived.messages)
+    ? archived.messages.map((message) => normalizePersistedMessage(message))
+    : []
+  const normalizedLatestResult = normalizeAgentResultPayload(archived.latestResult || null)
+  const preferredStoredResultSnapshot = pickPreferredResultSnapshot(
+    archived.resultVisualizationSnapshot,
+    archived.visualizationSnapshot,
+  )
+  const synthesizedResultSnapshot = buildResultSnapshotFromResult(
+    normalizedLatestResult,
+    archived.title || 'Conversation',
+    toModelFromVisualizationSnapshot(archived.modelVisualizationSnapshot || preferredStoredResultSnapshot),
+  )
+  const repairedResultSnapshot = pickPreferredResultSnapshot(preferredStoredResultSnapshot, synthesizedResultSnapshot)
+  const staleStructuralData =
+    isStaleVisualizationSnapshot(archived.modelVisualizationSnapshot)
+    || isStaleVisualizationSnapshot(repairedResultSnapshot)
+    || isStaleStructuralResult(normalizedLatestResult)
+
+  if (staleStructuralData) {
+    return {
+      ...archived,
+      messages: normalizedMessages,
+      modelText: '',
+      modelSyncMessage: '',
+      activePanel: archived.activePanel === 'report' ? 'analysis' : archived.activePanel,
+      latestResult: null,
+      modelVisualizationSnapshot: null,
+      resultVisualizationSnapshot: null,
+      visualizationSnapshot: null,
+      staleStructuralData: true,
+    }
+  }
+
+  return {
+    ...archived,
+    messages: normalizedMessages,
+    latestResult: normalizedLatestResult,
+    resultVisualizationSnapshot: repairedResultSnapshot,
+    visualizationSnapshot: repairedResultSnapshot || archived.visualizationSnapshot || null,
+    staleStructuralData: false,
+  }
 }
 
 function snapshotHasResultData(snapshot?: VisualizationSnapshot | null) {
@@ -805,12 +1147,15 @@ function buildResultSnapshotFromResult(
     normalizedResult.model && typeof normalizedResult.model === 'object' && !Array.isArray(normalizedResult.model)
       ? normalizedResult.model
       : null
+  const visualizationHints = extractVisualizationHints(normalizedResult)
 
   return buildVisualizationSnapshot({
     title: buildVisualizationTitle(normalizedResult, title),
     model: modelFromResult ?? fallbackModel ?? null,
     analysis: extractAnalysis(normalizedResult),
     mode: 'analysis-result',
+    memberUtilizationMap: visualizationHints?.memberUtilizationMap,
+    bucklingModes: visualizationHints?.bucklingModes,
   })
 }
 
@@ -939,7 +1284,27 @@ function AnalysisPanel({
               {!visualizationSnapshot && modelVisualizationSnapshot ? t('visualizationPreviewModel') : t('visualizationOpen')}
             </Button>
           )}
-          <div className="grid w-full grid-cols-2 rounded-2xl border border-border/70 bg-background/70 p-1 sm:w-auto dark:border-white/10 dark:bg-white/5">
+          <div className="grid w-full grid-cols-2 rounded-2xl border border-border/70 bg-background/70 p-1 sm:w-auto dark:border-white/10 dark:bg-white/5"
+            role="tablist" aria-label={t('tabPanelAnalysisLabel')}
+            onKeyDown={(e) => {
+              if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+                e.preventDefault()
+                const nextTab = activeTab === 'analysis' ? 'report' : 'analysis'
+                onTabChange(nextTab)
+                requestAnimationFrame(() => {
+                  document.getElementById(nextTab === 'analysis' ? 'tab-analysis' : 'tab-report')?.focus()
+                })
+              } else if (e.key === 'Home') {
+                e.preventDefault()
+                onTabChange('analysis')
+                requestAnimationFrame(() => { document.getElementById('tab-analysis')?.focus() })
+              } else if (e.key === 'End') {
+                e.preventDefault()
+                onTabChange('report')
+                requestAnimationFrame(() => { document.getElementById('tab-report')?.focus() })
+              }
+            }}
+          >
             <button
               className={cn(
                 'rounded-xl px-4 py-2.5 text-sm font-medium transition',
@@ -949,6 +1314,11 @@ function AnalysisPanel({
               )}
               onClick={() => onTabChange('analysis')}
               type="button"
+              role="tab"
+              id="tab-analysis"
+              aria-selected={activeTab === 'analysis'}
+              aria-controls="tabpanel-output"
+              tabIndex={activeTab === 'analysis' ? 0 : -1}
             >
               {t('analysisTab')}
             </button>
@@ -961,6 +1331,11 @@ function AnalysisPanel({
               )}
               onClick={() => onTabChange('report')}
               type="button"
+              role="tab"
+              id="tab-report"
+              aria-selected={activeTab === 'report'}
+              aria-controls="tabpanel-output"
+              tabIndex={activeTab === 'report' ? 0 : -1}
             >
               {t('reportTab')}
             </button>
@@ -968,7 +1343,7 @@ function AnalysisPanel({
         </div>
       </div>
 
-      <div data-testid="console-output-scroll" className="flex-1 overflow-auto p-5 xl:min-h-0">
+      <div data-testid="console-output-scroll" className="flex-1 overflow-auto p-5 xl:min-h-0" role="tabpanel" id="tabpanel-output" aria-labelledby={`tab-${activeTab}`}>
         {!result && (
           <Card className="border-border/70 bg-card/85 text-foreground shadow-none dark:border-white/10 dark:bg-slate-950/40">
             <CardHeader>
@@ -1009,9 +1384,7 @@ function AnalysisPanel({
                 </div>
                 <div>
                   <CardTitle className="text-xl text-foreground">{t('executionSummary')}</CardTitle>
-                  <CardDescription className="text-muted-foreground">
-                    {result.response || t('noNaturalLanguageSummary')}
-                  </CardDescription>
+                  <MarkdownBody compact content={result.response || t('noNaturalLanguageSummary')} />
                 </div>
               </CardHeader>
               {(stats.length > 0 || result.plan?.length) && (
@@ -1099,9 +1472,7 @@ function AnalysisPanel({
               >
                 <CardHeader>
                   <CardTitle className="text-lg">{t('guidancePanelTitle')}</CardTitle>
-                  <CardDescription className="text-muted-foreground">
-                    {result.response || t('guidancePanelBody')}
-                  </CardDescription>
+                  <MarkdownBody compact content={result.response || t('guidancePanelBody')} />
                 </CardHeader>
                 <CardContent className="space-y-4">
                   <div className="grid gap-3 md:grid-cols-2">
@@ -1116,7 +1487,7 @@ function AnalysisPanel({
                   {guidance.fallbackSupportNote && (
                     <div className="rounded-2xl border border-cyan-300/30 bg-cyan-300/10 p-4 text-sm leading-6 text-foreground">
                       <div className="mb-2 text-xs uppercase tracking-[0.18em] text-cyan-700 dark:text-cyan-200">{t('guidanceSupportNote')}</div>
-                      <div>{guidance.fallbackSupportNote}</div>
+                      <MarkdownBody compact content={guidance.fallbackSupportNote} className="prose-p:text-foreground dark:prose-p:text-foreground" />
                     </div>
                   )}
 
@@ -1149,7 +1520,7 @@ function AnalysisPanel({
                   {guidance.recommendedNextStep && (
                     <div className="rounded-2xl border border-border/70 bg-background/70 p-4 dark:border-white/10 dark:bg-white/5">
                       <div className="mb-2 text-xs uppercase tracking-[0.18em] text-muted-foreground">{t('guidanceRecommendedNextStep')}</div>
-                      <div className="text-sm leading-6 text-foreground">{guidance.recommendedNextStep}</div>
+                      <MarkdownBody compact content={guidance.recommendedNextStep} className="prose-p:text-foreground dark:prose-p:text-foreground" />
                     </div>
                   )}
                 </CardContent>
@@ -1184,8 +1555,8 @@ function AnalysisPanel({
                     {t('reportSummary')}
                   </CardTitle>
                 </CardHeader>
-                <CardContent className="text-sm leading-7 text-muted-foreground">
-                  {reportSummary}
+                <CardContent>
+                  <MarkdownBody content={reportSummary} />
                 </CardContent>
               </Card>
             )}
@@ -1199,8 +1570,8 @@ function AnalysisPanel({
               </CardHeader>
               <CardContent>
                 {reportMarkdown ? (
-                  <article className="prose prose-sm max-w-none dark:prose-invert prose-headings:text-foreground prose-p:text-muted-foreground prose-strong:text-foreground prose-code:text-cyan-700 dark:prose-code:text-cyan-200">
-                    <ReactMarkdown>{reportMarkdown}</ReactMarkdown>
+                  <article>
+                    <MarkdownBody content={reportMarkdown} />
                   </article>
                 ) : (
                   <div className="rounded-2xl border border-dashed border-border/70 bg-background/70 p-6 text-sm text-muted-foreground dark:border-white/10 dark:bg-white/5">
@@ -1214,6 +1585,16 @@ function AnalysisPanel({
       </div>
     </div>
   )
+}
+
+const PDF_LINK_RE = /\[PDF[^\]]*\]\(([^)\s]+)\)/
+
+function extractPdfUrl(content: string): string | null {
+  const m = content.match(PDF_LINK_RE)
+  if (!m) return null
+  const relative = m[1]
+  if (relative.startsWith('http') || relative.startsWith('//')) return relative
+  return `${API_BASE}${relative}`
 }
 
 export function AIConsole() {
@@ -1230,13 +1611,21 @@ export function AIConsole() {
     [t]
   )
   const [messages, setMessages] = useState<Message[]>([initialAssistantMessage])
+  const messagesRef = useRef(messages)
+  useEffect(() => { messagesRef.current = messages }, [messages])
   const [input, setInput] = useState('')
   const [conversationId, setConversationId] = useState('')
   const [serverConversations, setServerConversations] = useState<ConversationSummary[]>([])
   const [conversationArchive, setConversationArchive] = useState<Record<string, PersistedConversation>>({})
   const [historyLoading, setHistoryLoading] = useState(true)
   const [historyError, setHistoryError] = useState('')
-  const [isSending, setIsSending] = useState(false)
+  const [streamingSessions, setStreamingSessions] = useState<Map<string, StreamSession>>(new Map())
+  const streamingSessionsRef = useRef<Map<string, StreamSession>>(new Map())
+  const currentPresentationRef = useRef<AssistantPresentation | null>(null)
+  const conversationIdRef = useRef(conversationId)
+  const submittingRef = useRef(false)
+  const [isStreaming, setIsStreaming] = useState(false)
+  useEffect(() => { conversationIdRef.current = conversationId }, [conversationId])
   const [errorMessage, setErrorMessage] = useState('')
   const [contextOpen, setContextOpen] = useState(false)
   const [modelText, setModelText] = useState('')
@@ -1247,6 +1636,9 @@ export function AIConsole() {
   const [selectedToolIds, setSelectedToolIds] = useState<string[]>([])
   const [hasExplicitSkillSelection, setHasExplicitSkillSelection] = useState(false)
   const [hasExplicitToolSelection, setHasExplicitToolSelection] = useState(false)
+  const [allEngines, setAllEngines] = useState<Array<{ id: string; name: string; available: boolean; priority: number; status: string; unavailableReason?: string }>>([])
+
+  const [probeResults, setProbeResults] = useState<Record<string, { passed: boolean; durationMs?: number; error?: string; loading?: boolean }>>({})
   const [latestResult, setLatestResult] = useState<AgentResult | null>(null)
   const [latestModelVisualizationSnapshot, setLatestModelVisualizationSnapshot] = useState<VisualizationSnapshot | null>(null)
   const [latestResultVisualizationSnapshot, setLatestResultVisualizationSnapshot] = useState<VisualizationSnapshot | null>(null)
@@ -1265,6 +1657,42 @@ export function AIConsole() {
   // 追踪最后有效的结果用于持久化（不会被引擎切换清除）
   const lastValidResultRef = useRef<AgentResult | null>(null)
   const lastValidResultVisualizationRef = useRef<VisualizationSnapshot | null>(null)
+
+  // Streaming session helpers
+  function registerStreamSession(session: StreamSession) {
+    setStreamingSessions((prev) => new Map(prev).set(session.conversationId, session))
+    streamingSessionsRef.current.set(session.conversationId, session)
+  }
+
+  function updateStreamSessionStatus(convId: string, status: StreamSession['status']) {
+    setStreamingSessions((prev) => {
+      const next = new Map(prev)
+      const existing = next.get(convId)
+      if (existing) next.set(convId, { ...existing, status })
+      return next
+    })
+    const existing = streamingSessionsRef.current.get(convId)
+    if (existing) streamingSessionsRef.current.set(convId, { ...existing, status })
+  }
+
+  function removeStreamSession(convId: string) {
+    setStreamingSessions((prev) => {
+      const next = new Map(prev)
+      next.delete(convId)
+      return next
+    })
+    streamingSessionsRef.current.delete(convId)
+  }
+
+  function stopStream(targetConversationId?: string) {
+    const id = targetConversationId || conversationId
+    const session = streamingSessionsRef.current.get(id)
+    if (session?.status === 'streaming') {
+      session.abortController.abort()
+      session.reader?.cancel().catch(() => {})
+      updateStreamSessionStatus(id, 'aborted')
+    }
+  }
 
   // 保持 refs 与最新有效结果同步
   useEffect(() => {
@@ -1414,13 +1842,13 @@ export function AIConsole() {
     if (typeof chatScrollElement.scrollTo === 'function') {
       chatScrollElement.scrollTo({
         top: chatScrollElement.scrollHeight,
-        behavior: isSending ? 'auto' : 'smooth',
+        behavior: isStreaming ? 'auto' : 'smooth',
       })
       return
     }
 
     chatScrollElement.scrollTop = chatScrollElement.scrollHeight
-  }, [messages, isSending])
+  }, [messages, isStreaming])
 
   useEffect(() => {
     setConversationArchive(loadConversationArchive())
@@ -1468,6 +1896,110 @@ export function AIConsole() {
   }, [])
 
   useEffect(() => {
+    let active = true
+
+    async function loadEngines() {
+      try {
+        const response = await fetch(`${API_BASE}/api/v1/analysis-engines`)
+        if (!response.ok || !active) return
+        const payload = await response.json()
+        if (!active || !Array.isArray(payload?.engines)) return
+        const engines = (payload.engines as Record<string, unknown>[]).map((e) => ({
+          id: String(e.id ?? ''),
+          name: String(e.name ?? e.id ?? ''),
+          available: Boolean(e.available),
+          priority: Number(e.priority ?? 0),
+          status: String(e.status ?? 'unknown'),
+          unavailableReason: typeof e.unavailableReason === 'string' ? e.unavailableReason : undefined,
+        }))
+        setAllEngines(engines.sort((a, b) => b.priority - a.priority))
+      } catch {
+        if (active) {
+          setAllEngines([])
+        }
+      }
+    }
+
+    loadEngines()
+    return () => { active = false }
+  }, [])
+
+  const [probePopupOpen, setProbePopupOpen] = useState(false)
+  const [probeAllRunning, setProbeAllRunning] = useState(false)
+  const probeButtonRef = useRef<HTMLButtonElement>(null)
+  const composerTextareaRef = useRef<HTMLTextAreaElement>(null)
+
+  async function probeAllEngines() {
+    setProbeAllRunning(true)
+    setProbePopupOpen(true)
+    const initial: typeof probeResults = {}
+    allEngines.forEach((e) => { initial[e.id] = { passed: false, loading: true } })
+    setProbeResults(initial)
+
+    let active = true
+
+    await Promise.allSettled(
+      allEngines.map(async (engine) => {
+        try {
+          const response = await fetch(`${API_BASE}/api/v1/analysis-engines/${encodeURIComponent(engine.id)}/probe`, { method: 'POST' })
+          if (!response.ok) {
+            const text = await response.text()
+            if (active) setProbeResults((prev) => ({ ...prev, [engine.id]: { passed: false, error: text || `HTTP ${response.status}`, loading: false } }))
+            return
+          }
+          const payload = await response.json()
+          if (active) {
+            setProbeResults((prev) => ({
+              ...prev,
+              [engine.id]: {
+                passed: Boolean(payload.passed),
+                durationMs: typeof payload.durationMs === 'number' ? payload.durationMs : undefined,
+                error: typeof payload.error === 'string' ? payload.error : undefined,
+                loading: false,
+              },
+            }))
+          }
+        } catch (err) {
+          if (active) setProbeResults((prev) => ({ ...prev, [engine.id]: { passed: false, error: String(err), loading: false } }))
+        }
+      }),
+    )
+
+    if (active) setProbeAllRunning(false)
+  }
+
+  async function probeSingleEngine(engineId: string) {
+    setProbeResults((prev) => ({ ...prev, [engineId]: { passed: false, loading: true } }))
+    try {
+      const response = await fetch(`${API_BASE}/api/v1/analysis-engines/${encodeURIComponent(engineId)}/probe`, { method: 'POST' })
+      if (!response.ok) {
+        const text = await response.text()
+        setProbeResults((prev) => ({ ...prev, [engineId]: { passed: false, error: text || `HTTP ${response.status}`, loading: false } }))
+        return
+      }
+      let payload: { passed?: unknown; durationMs?: unknown; error?: unknown }
+      try {
+        payload = await response.json()
+      } catch {
+        setProbeResults((prev) => ({ ...prev, [engineId]: { passed: false, error: 'Invalid JSON response', loading: false } }))
+        return
+      }
+      setProbeResults((prev) => ({
+        ...prev,
+        [engineId]: {
+          passed: Boolean(payload.passed),
+          durationMs: typeof payload.durationMs === 'number' ? payload.durationMs : undefined,
+          error: typeof payload.error === 'string' ? payload.error : undefined,
+          loading: false,
+        },
+      }))
+    } catch (err) {
+      setProbeResults((prev) => ({ ...prev, [engineId]: { passed: false, error: String(err), loading: false } }))
+    }
+  }
+
+
+  useEffect(() => {
     if (capabilityPreferencesHydratedRef.current) {
       return
     }
@@ -1497,7 +2029,7 @@ export function AIConsole() {
       setHasExplicitToolSelection(false)
     }
     capabilityPreferencesHydratedRef.current = true
-  }, [availableSkills, baseCallableToolIds, capabilityMatrixLoaded, defaultSelectedSkillIds, initialDefaultToolIds, skillDomainById, skillNormalization, skillsLoaded])
+  }, [availableSkills, baseCallableToolIds, capabilityMatrix, capabilityMatrixLoaded, defaultSelectedSkillIds, initialDefaultToolIds, skillDomainById, skillNormalization, skillsLoaded])
 
   useEffect(() => {
     let active = true
@@ -1658,14 +2190,16 @@ export function AIConsole() {
     }
   }, [latestModelVisualizationSnapshot, latestResultVisualizationSnapshot, parsedComposerModelError, t, visualizationSource])
 
+  // Track which conversation IDs have been deleted locally to prevent auto-persist from restoring them
+  const deletedConversationIdsRef = useRef<Set<string>>(new Set())
+
   useEffect(() => {
-    if (!conversationId) {
+    if (!conversationId || deletedConversationIdsRef.current.has(conversationId)) {
       return
     }
 
-    setConversationArchive((current) => ({
-      ...current,
-      [conversationId]: {
+    setConversationArchive((current) => {
+      const nextEntry = sanitizePersistedConversation({
         id: conversationId,
         title:
           current[conversationId]?.title
@@ -1692,7 +2226,6 @@ export function AIConsole() {
         hasExplicitToolSelection,
         modelSyncMessage,
         activePanel,
-        // Preserve persisted result/model snapshots during transient null states (e.g. refresh restore sequence).
         latestResult: latestResult ?? current[conversationId]?.latestResult ?? null,
         modelVisualizationSnapshot:
           latestModelVisualizationSnapshot
@@ -1703,8 +2236,19 @@ export function AIConsole() {
           ?? current[conversationId]?.resultVisualizationSnapshot
           ?? current[conversationId]?.visualizationSnapshot
           ?? null,
-      },
-    }))
+        visualizationSnapshot:
+          latestResultVisualizationSnapshot
+          ?? current[conversationId]?.resultVisualizationSnapshot
+          ?? current[conversationId]?.visualizationSnapshot
+          ?? null,
+        staleStructuralData: current[conversationId]?.staleStructuralData ?? false,
+      })
+
+      return {
+        ...current,
+        [conversationId]: nextEntry,
+      }
+    })
   }, [
     activePanel,
     conversationId,
@@ -1763,10 +2307,6 @@ export function AIConsole() {
     return payload.id as string
   }
 
-  function appendMessage(message: Message) {
-    setMessages((current) => [...current, message])
-  }
-
   function markConversationActivity(targetConversationId: string | undefined) {
     if (!targetConversationId) {
       return
@@ -1778,8 +2318,48 @@ export function AIConsole() {
     }))
   }
 
-  function replaceMessage(messageId: string, updater: (message: Message) => Message) {
-    setMessages((current) => current.map((message) => (message.id === messageId ? updater(message) : message)))
+  function appendMessageForConversation(targetConvId: string, message: Message) {
+    if (targetConvId === conversationIdRef.current) {
+      setMessages((current) => [...current, message])
+    } else {
+      setConversationArchive((current) => {
+        const existing = current[targetConvId]
+        if (!existing) return current
+        return {
+          ...current,
+          [targetConvId]: {
+            ...existing,
+            messages: [...existing.messages, message],
+          },
+        }
+      })
+    }
+  }
+
+  function replaceMessageForConversation(
+    targetConvId: string,
+    messageId: string,
+    updater: (message: Message) => Message,
+  ) {
+    if (targetConvId === conversationIdRef.current) {
+      setMessages((current) =>
+        current.map((message) => (message.id === messageId ? updater(message) : message))
+      )
+    } else {
+      setConversationArchive((current) => {
+        const existing = current[targetConvId]
+        if (!existing) return current
+        return {
+          ...current,
+          [targetConvId]: {
+            ...existing,
+            messages: existing.messages.map((message) =>
+              (message.id === messageId ? updater(message) : message)
+            ),
+          },
+        }
+      })
+    }
   }
 
   function persistConversationSnapshotsToArchive(
@@ -1811,33 +2391,36 @@ export function AIConsole() {
         ?? existing?.latestResult
         ?? null
 
+      const nextEntry = sanitizePersistedConversation({
+        id: targetConversationId,
+        title: existing?.title || serverConversation?.title || t('untitledConversation'),
+        type: existing?.type || serverConversation?.type || 'general',
+        createdAt: existing?.createdAt || serverConversation?.createdAt || new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        messages: existing?.messages || messages,
+        modelText: existing?.modelText ?? modelText,
+        selectedSkillIds: existing?.selectedSkillIds || selectedSkillIds,
+        selectedToolIds: existing?.selectedToolIds || selectedToolIds,
+        hasExplicitSkillSelection: existing?.hasExplicitSkillSelection ?? hasExplicitSkillSelection,
+        hasExplicitToolSelection: existing?.hasExplicitToolSelection ?? hasExplicitToolSelection,
+        modelSyncMessage: existing?.modelSyncMessage || modelSyncMessage,
+        activePanel: existing?.activePanel || activePanel,
+        latestResult: latestResultValue,
+        modelVisualizationSnapshot: modelSnapshot,
+        resultVisualizationSnapshot: resultSnapshot,
+        visualizationSnapshot: resultSnapshot,
+        staleStructuralData: existing?.staleStructuralData ?? false,
+      })
+
       return {
         ...current,
-        [targetConversationId]: {
-          id: targetConversationId,
-          title: existing?.title || serverConversation?.title || t('untitledConversation'),
-          type: existing?.type || serverConversation?.type || 'general',
-          createdAt: existing?.createdAt || serverConversation?.createdAt || new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-          messages: existing?.messages || messages,
-          modelText: existing?.modelText ?? modelText,
-          selectedSkillIds: existing?.selectedSkillIds || selectedSkillIds,
-          selectedToolIds: existing?.selectedToolIds || selectedToolIds,
-          hasExplicitSkillSelection: existing?.hasExplicitSkillSelection ?? hasExplicitSkillSelection,
-          hasExplicitToolSelection: existing?.hasExplicitToolSelection ?? hasExplicitToolSelection,
-          modelSyncMessage: existing?.modelSyncMessage || modelSyncMessage,
-          activePanel: existing?.activePanel || activePanel,
-          latestResult: latestResultValue,
-          modelVisualizationSnapshot: modelSnapshot,
-          resultVisualizationSnapshot: resultSnapshot,
-          visualizationSnapshot: resultSnapshot,
-        },
+        [targetConversationId]: nextEntry,
       }
     })
   }
 
   async function handleSelectConversation(nextConversationId: string) {
-    if (isSending || nextConversationId === conversationId) {
+    if (nextConversationId === conversationId) {
       return
     }
 
@@ -1856,10 +2439,11 @@ export function AIConsole() {
         ? payload.messages.map((message) => ({
             id: message.id,
             role: (message.role === 'assistant' ? 'assistant' : 'user') as Message['role'],
-            content: message.content,
-            status: 'done' as const,
+            content: stripLegacyAbortedSuffix(message.content),
+            status: parsePersistedMessageStatus(message.metadata, message.content),
             timestamp: message.createdAt,
             debugDetails: parsePersistedDebugDetails(message.metadata),
+            presentation: parsePersistedPresentation(message.metadata),
           }))
         : []
       const archivedMessages = archived?.messages || []
@@ -1898,49 +2482,88 @@ export function AIConsole() {
         session?.model || null
       )
       const nextFinalResultSnapshot = pickPreferredResultSnapshot(nextResolvedResultSnapshot, synthesizedResultSnapshot)
-      const nextModelText =
+      const restoredModelText =
         toModelText(session?.model)
         || archived?.modelText
         || toModelText(nextLatestResult?.model)
         || toModelTextFromSnapshot(nextModelSnapshot)
         || toModelTextFromSnapshot(nextFinalResultSnapshot)
         || ''
+      const hasStaleStructuralData =
+        isStaleVisualizationSnapshot(nextModelSnapshot)
+        || isStaleVisualizationSnapshot(nextFinalResultSnapshot)
+        || isStaleStructuralResult(nextLatestResult)
+      const safeLatestResult = hasStaleStructuralData ? null : nextLatestResult
+      const safeModelSnapshot = hasStaleStructuralData ? null : nextModelSnapshot
+      const safeResultSnapshot = hasStaleStructuralData ? null : nextFinalResultSnapshot
+      const safeModelText = hasStaleStructuralData ? '' : restoredModelText
+      const safeModelSyncMessage = hasStaleStructuralData ? '' : nextModelSyncMessage
+      const safeActivePanel = hasStaleStructuralData ? 'analysis' : nextActivePanel
 
       setConversationId(nextConversationId)
       setMessages(nextMessages)
-      setModelText(nextModelText)
-      setModelSyncMessage(nextModelSyncMessage)
-      setLatestResult(nextLatestResult)
-      setLatestModelVisualizationSnapshot(nextModelSnapshot)
-      setLatestResultVisualizationSnapshot(nextFinalResultSnapshot)
-      setActivePanel(nextActivePanel)
+      setModelText(safeModelText)
+      setModelSyncMessage(safeModelSyncMessage)
+      setLatestResult(safeLatestResult)
+      setLatestModelVisualizationSnapshot(safeModelSnapshot)
+      setLatestResultVisualizationSnapshot(safeResultSnapshot)
+      setActivePanel(safeActivePanel)
+
+      if (hasStaleStructuralData) {
+        setConversationArchive((current) => {
+          const existing = current[nextConversationId]
+          if (!existing) {
+            return current
+          }
+          return {
+            ...current,
+            [nextConversationId]: sanitizePersistedConversation({
+              ...existing,
+              modelText: '',
+              modelSyncMessage: '',
+              activePanel: 'analysis',
+              latestResult: null,
+              modelVisualizationSnapshot: null,
+              resultVisualizationSnapshot: null,
+              visualizationSnapshot: null,
+              staleStructuralData: true,
+            }),
+          }
+        })
+        toast.error(`${t('staleStructuralSessionTitle')}: ${t('staleStructuralSessionBody')}`)
+      }
     } catch (error) {
       if (archived) {
+        const restoredArchive = sanitizePersistedConversation(archived)
         setConversationId(nextConversationId)
-        setMessages(archived.messages.length ? archived.messages : [initialAssistantMessage])
+        setMessages(restoredArchive.messages.length ? restoredArchive.messages : [initialAssistantMessage])
         setModelText(
-          archived.modelText
-          || toModelText(archived.latestResult?.model)
-          || toModelTextFromSnapshot(archived.modelVisualizationSnapshot)
-          || toModelTextFromSnapshot(archived.resultVisualizationSnapshot || archived.visualizationSnapshot)
+          restoredArchive.modelText
+          || toModelText(restoredArchive.latestResult?.model)
+          || toModelTextFromSnapshot(restoredArchive.modelVisualizationSnapshot)
+          || toModelTextFromSnapshot(restoredArchive.resultVisualizationSnapshot || restoredArchive.visualizationSnapshot)
           || ''
         )
-        setModelSyncMessage(archived.modelSyncMessage || '')
-        const archivedLatestResult = normalizeAgentResultPayload(archived.latestResult || null)
+        setModelSyncMessage(restoredArchive.modelSyncMessage || '')
+        const archivedLatestResult = normalizeAgentResultPayload(restoredArchive.latestResult || null)
         setLatestResult(archivedLatestResult)
-        setLatestModelVisualizationSnapshot(archived.modelVisualizationSnapshot || null)
+        setLatestModelVisualizationSnapshot(restoredArchive.modelVisualizationSnapshot || null)
         const archivedSynthesizedResultSnapshot = buildResultSnapshotFromResult(
           archivedLatestResult,
-          archived.title || t('untitledConversation'),
-          toModelFromVisualizationSnapshot(archived.modelVisualizationSnapshot || archived.resultVisualizationSnapshot || archived.visualizationSnapshot)
+          restoredArchive.title || t('untitledConversation'),
+          toModelFromVisualizationSnapshot(restoredArchive.modelVisualizationSnapshot || restoredArchive.resultVisualizationSnapshot || restoredArchive.visualizationSnapshot)
         )
-        setLatestResultVisualizationSnapshot(
-          pickPreferredResultSnapshot(
-            pickPreferredResultSnapshot(archived.resultVisualizationSnapshot, archived.visualizationSnapshot),
-            archivedSynthesizedResultSnapshot
-          )
+        const archivedResultSnapshot = pickPreferredResultSnapshot(
+          pickPreferredResultSnapshot(restoredArchive.resultVisualizationSnapshot, restoredArchive.visualizationSnapshot),
+          archivedSynthesizedResultSnapshot
         )
-        setActivePanel(archived.activePanel || (archivedLatestResult?.report?.markdown ? 'report' : 'analysis'))
+        setLatestResultVisualizationSnapshot(archivedResultSnapshot)
+        setActivePanel(restoredArchive.activePanel || (archivedLatestResult?.report?.markdown ? 'report' : 'analysis'))
+
+        if (restoredArchive.staleStructuralData) {
+          toast.error(`${t('staleStructuralSessionTitle')}: ${t('staleStructuralSessionBody')}`)
+        }
+
         return
       }
 
@@ -1964,15 +2587,11 @@ export function AIConsole() {
   }
 
   function handleNewConversation() {
-    if (isSending) {
-      return
-    }
-
     resetConsoleState()
   }
 
   async function handleDeleteConversation(targetConversationId: string) {
-    if (isSending || deletingConversationId || !targetConversationId) {
+    if (streamingSessions.get(targetConversationId)?.status === 'streaming' || deletingConversationId || !targetConversationId) {
       return
     }
 
@@ -1988,9 +2607,15 @@ export function AIConsole() {
         throw new Error(`${t('deleteConversationFailed')} HTTP ${response.status}`)
       }
 
+      deletedConversationIdsRef.current.add(targetConversationId)
       const remainingConversations = mergedConversations.filter((conversation) => conversation.id !== targetConversationId)
       setServerConversations((current) => current.filter((conversation) => conversation.id !== targetConversationId))
       setConversationArchive((current) => {
+        const next = { ...current }
+        delete next[targetConversationId]
+        return next
+      })
+      setConversationActivityAt((current) => {
         const next = { ...current }
         delete next[targetConversationId]
         return next
@@ -2065,9 +2690,10 @@ export function AIConsole() {
 
   async function handleSubmit() {
     const trimmedInput = input.trim()
-    if (!trimmedInput || isSending) {
+    if (!trimmedInput || submittingRef.current) {
       return
     }
+    submittingRef.current = true
 
     const parsedModel = parseModelJson(modelText, t)
     if (parsedModel.error) {
@@ -2075,6 +2701,7 @@ export function AIConsole() {
       setContextOpen(true)
     }
     const contextModel = parsedModel.error ? undefined : parsedModel.model
+    const resumeFromMessage = resolveResumeFromMessage(messagesRef.current, trimmedInput)
 
     const userMessage: Message = {
       id: createId('user'),
@@ -2087,28 +2714,103 @@ export function AIConsole() {
     const assistantMessageId = createId('assistant')
     const assistantSeed = t('assistantSeedAuto')
 
+    currentPresentationRef.current = null
     setErrorMessage('')
-    appendMessage(userMessage)
-    appendMessage({
+    setInput('')
+    setVisualizationOpen(false)
+    setVisualizationSource('result')
+    setModelSyncMessage('')
+    // Append user message and assistant seed immediately (before async work)
+    setMessages((current) => [...current, userMessage])
+    setMessages((current) => [...current, {
       id: assistantMessageId,
       role: 'assistant',
       content: assistantSeed,
       status: 'streaming',
       timestamp: new Date().toISOString(),
-    })
-    setInput('')
-    setIsSending(true)
-    setVisualizationOpen(false)
-    setVisualizationSource('result')
-    setModelSyncMessage('')
+    }])
     let receivedResult = false
     let assistantContent = assistantSeed
     let activeConversationId = conversationId
     let shouldBumpConversationActivity = false
+    const abortController = new AbortController()
+    const traceId = assistantMessageId
+    setIsStreaming(true)
+
+    const syncAssistantPresentationMessage = (
+      nextPresentation: AssistantPresentation,
+      nextStatus: Message['status'] = nextPresentation.status === 'done'
+        ? 'done'
+        : nextPresentation.status === 'error'
+          ? 'error'
+          : nextPresentation.status === 'aborted'
+            ? 'aborted'
+            : 'streaming',
+    ) => {
+      currentPresentationRef.current = nextPresentation
+      replaceMessageForConversation(activeConversationId, assistantMessageId, (message) => ({
+        ...message,
+        content: nextPresentation.summaryText || assistantContent,
+        status: nextStatus,
+        presentation: nextPresentation,
+      }))
+    }
+
+    const finalizeAbortedTurn = async () => {
+      const abortedContent = resolveAbortedAssistantContent(assistantContent, assistantSeed)
+      const abortedPresentation = currentPresentationRef.current
+        ? {
+            ...currentPresentationRef.current,
+            status: 'aborted' as const,
+            completedAt: currentPresentationRef.current.completedAt || new Date().toISOString(),
+            summaryText: currentPresentationRef.current.summaryText || abortedContent,
+          }
+        : undefined
+
+      replaceMessageForConversation(activeConversationId, assistantMessageId, (message) => ({
+        ...message,
+        content: abortedContent,
+        status: 'aborted',
+        presentation: abortedPresentation ?? message.presentation,
+      }))
+
+      // Note: manual localStorage write removed — replaceMessageForConversation
+      // updates React state (which feeds the auto-persist useEffect), and the
+      // backend persistence below ensures the conversation survives across
+      // browser sessions.  The old approach read from messagesRef.current which
+      // points to the *currently viewed* conversation, causing data corruption
+      // when a background stream was aborted while the user had switched away.
+
+      if (activeConversationId) {
+        await saveConversationMessagesToBackend(activeConversationId, {
+          userMessage: trimmedInput,
+          assistantContent: abortedContent,
+          assistantAborted: true,
+          traceId,
+          assistantPresentation: abortedPresentation,
+        })
+      }
+    }
 
     try {
       const nextConversationId = await ensureConversation(trimmedInput)
       activeConversationId = nextConversationId
+
+      // Set conversationId immediately so the Stop button appears
+      // without waiting for the SSE start event.
+      if (nextConversationId !== conversationId) {
+        conversationIdRef.current = nextConversationId
+        setConversationId(nextConversationId)
+      }
+
+      registerStreamSession({
+        conversationId: nextConversationId,
+        status: 'streaming',
+        abortController,
+        assistantMessageId,
+        reader: null,
+      })
+
       const storedPreferences = capabilityPreferencesHydratedRef.current ? null : loadCapabilityPreferences()
       const storedSkillIds = storedPreferences
         ? skillNormalization.normalizeSkillIds(storedPreferences.skillIds)
@@ -2140,8 +2842,10 @@ export function AIConsole() {
         skillIds: effectiveSkillIds,
         enabledToolIds: effectiveEnabledToolIds,
         model: contextModel,
-        modelFormat: contextModel ? 'structuremodel-v1' : undefined,
+        modelFormat: contextModel ? 'structuremodel-v2' : undefined,
+        engineId: undefined,
         autoCodeCheck: hasSelectedCodeCheckSkill || undefined,
+        resumeFromMessage,
       }
       const promptSnapshot = buildPromptSnapshot(trimmedInput, contextPayload as Record<string, unknown>)
       const debugSkillIds = Array.isArray((contextPayload as Record<string, unknown>).skillIds)
@@ -2157,8 +2861,10 @@ export function AIConsole() {
         body: JSON.stringify({
           message: trimmedInput,
           conversationId: nextConversationId,
+          traceId,
           context: contextPayload,
         }),
+        signal: abortController.signal,
       })
 
       if (!response.ok || !response.body) {
@@ -2166,19 +2872,25 @@ export function AIConsole() {
       }
 
       const reader = response.body.getReader()
+      // Store reader so stopStream can cancel it directly
+      const existingSession = streamingSessionsRef.current.get(nextConversationId)
+      if (existingSession) {
+        existingSession.reader = reader
+      }
       const decoder = new TextDecoder()
       let buffer = ''
       let chatBuffer = ''
 
       while (true) {
+        if (abortController.signal.aborted) break
         const { value, done } = await reader.read()
         if (done) break
-
         buffer += decoder.decode(value, { stream: true })
         const parts = buffer.split('\n\n')
         buffer = parts.pop() || ''
 
         for (const part of parts) {
+          if (abortController.signal.aborted) break
           const line = part
             .split('\n')
             .map((item) => item.trim())
@@ -2199,7 +2911,7 @@ export function AIConsole() {
             const token = typeof payload.content === 'string' ? payload.content : ''
             chatBuffer += token
             assistantContent = chatBuffer || assistantSeed
-            replaceMessage(assistantMessageId, (message) => ({
+            replaceMessageForConversation(activeConversationId, assistantMessageId, (message) => ({
               ...message,
               content: assistantContent,
               status: 'streaming',
@@ -2209,7 +2921,7 @@ export function AIConsole() {
           if (payload.type === 'interaction_update') {
             const interactionMessage = buildInteractionMessage(payload, t, locale)
             assistantContent = interactionMessage
-            replaceMessage(assistantMessageId, (message) => ({
+            replaceMessageForConversation(activeConversationId, assistantMessageId, (message) => ({
               ...message,
               content: assistantContent,
               status: 'streaming',
@@ -2219,8 +2931,80 @@ export function AIConsole() {
           // 处理 'start' 类型消息（包含 conversationId）
           if (payload.type === 'start' && payload.content && typeof payload.content === 'object') {
             const { conversationId: newConversationId } = payload.content as { conversationId?: string; startedAt?: string }
-            if (newConversationId) {
+            // Only update the active conversationId if this stream belongs to the
+            // currently viewed conversation (or we had no conversation selected yet).
+            if (newConversationId && (!conversationIdRef.current || activeConversationId === conversationIdRef.current)) {
               setConversationId(newConversationId)
+            }
+          }
+
+          if (payload.type === 'presentation_init' && payload.presentation) {
+            syncAssistantPresentationMessage(payload.presentation, 'streaming')
+          }
+
+          if (payload.type === 'phase_upsert' && payload.phase && currentPresentationRef.current) {
+            const nextPresentation = reducePresentationEvent(currentPresentationRef.current, {
+              type: 'phase_upsert',
+              phase: payload.phase,
+            })
+            syncAssistantPresentationMessage(nextPresentation, 'streaming')
+          }
+
+          if (payload.type === 'step_upsert' && payload.phaseId && payload.step && currentPresentationRef.current) {
+            const nextPresentation = reducePresentationEvent(currentPresentationRef.current, {
+              type: 'step_upsert',
+              phaseId: payload.phaseId,
+              step: payload.step,
+            })
+            syncAssistantPresentationMessage(nextPresentation, 'streaming')
+          }
+
+          if (payload.type === 'artifact_upsert' && payload.artifact && currentPresentationRef.current) {
+            const nextPresentation = reducePresentationEvent(currentPresentationRef.current, {
+              type: 'artifact_upsert',
+              artifact: payload.artifact,
+            })
+            syncAssistantPresentationMessage(nextPresentation, 'streaming')
+          }
+
+          if (payload.type === 'summary_replace' && typeof payload.summaryText === 'string' && currentPresentationRef.current) {
+            assistantContent = payload.summaryText
+            const nextPresentation = reducePresentationEvent(currentPresentationRef.current, {
+              type: 'summary_replace',
+              summaryText: payload.summaryText,
+            })
+            syncAssistantPresentationMessage(nextPresentation, 'streaming')
+          }
+
+          if (payload.type === 'presentation_complete' && typeof payload.completedAt === 'string' && currentPresentationRef.current) {
+            const nextPresentation = reducePresentationEvent(currentPresentationRef.current, {
+              type: 'presentation_complete',
+              completedAt: payload.completedAt,
+            })
+            syncAssistantPresentationMessage(nextPresentation, 'done')
+          }
+
+          if (payload.type === 'presentation_error' && payload.phase && payload.message && currentPresentationRef.current) {
+            assistantContent = payload.message || assistantContent
+            const nextPresentation = reducePresentationEvent(currentPresentationRef.current, {
+              type: 'presentation_error',
+              phase: payload.phase as 'understanding' | 'modeling' | 'validation' | 'analysis' | 'report',
+              message: payload.message,
+            })
+            syncAssistantPresentationMessage(nextPresentation, 'error')
+          }
+
+          if (payload.type === 'artifact_payload_sync') {
+            if (payload.artifact === 'model' && payload.model) {
+              if (activeConversationId === conversationIdRef.current) {
+                applySynchronizedModel(payload.model, 'tool')
+              }
+            }
+            if (payload.artifact === 'analysis' && payload.latestResult && activeConversationId === conversationIdRef.current) {
+              setLatestResult((current) => ({
+                ...(current || {}),
+                ...(payload.latestResult || {}),
+              }))
             }
           }
 
@@ -2228,15 +3012,20 @@ export function AIConsole() {
             const result = {
               ...(payload.content as AgentResult),
             }
+            const visualizationHints = extractVisualizationHints(result)
             const debugDetails = buildMessageDebugDetails(promptSnapshot, debugSkillIds, debugToolIds, result)
             if (result.model && typeof result.model === 'object' && !Array.isArray(result.model)) {
-              applySynchronizedModel(result.model, result.analysis ? 'tool' : 'conversation')
+              if (activeConversationId === conversationIdRef.current) {
+                applySynchronizedModel(result.model, result.analysis ? 'tool' : 'conversation')
+              }
             }
             const visualizationSnapshot = buildVisualizationSnapshot({
               title: buildVisualizationTitle(result, trimmedInput.slice(0, 48) || t('untitledConversation')),
               model: (result.model && typeof result.model === 'object' && !Array.isArray(result.model) ? result.model : contextModel) ?? null,
               analysis: extractAnalysis(result),
               mode: 'analysis-result',
+              memberUtilizationMap: visualizationHints?.memberUtilizationMap,
+              bucklingModes: visualizationHints?.bucklingModes,
             })
             const modelSnapshot = buildVisualizationSnapshot({
               title: buildVisualizationTitle(result, trimmedInput.slice(0, 48) || t('untitledConversation')),
@@ -2244,27 +3033,46 @@ export function AIConsole() {
               mode: 'model-only',
             })
             receivedResult = true
-            setLatestResult(result)
-            setLatestModelVisualizationSnapshot(modelSnapshot)
-            setLatestResultVisualizationSnapshot(visualizationSnapshot)
-            persistConversationSnapshotsToArchive(activeConversationId || nextConversationId, {
+            // Only update active conversation state when this is the foreground stream
+            if (activeConversationId === conversationIdRef.current) {
+              setLatestResult(result)
+              setLatestModelVisualizationSnapshot(modelSnapshot)
+              setLatestResultVisualizationSnapshot(visualizationSnapshot)
+              setActivePanel(result.report?.markdown ? 'report' : 'analysis')
+            }
+            // Always persist results to archive (for both active and background)
+            persistConversationSnapshotsToArchive(activeConversationId, {
               latestResult: result,
               modelSnapshot,
               resultSnapshot: visualizationSnapshot,
             })
-            // 保存结果快照到后端
-            await saveConversationSnapshotToBackend(activeConversationId, {
+            // 保存结果快照到后端（fire-and-forget to avoid blocking the stream loop）
+            saveConversationSnapshotToBackend(activeConversationId, {
               modelSnapshot,
               resultSnapshot: visualizationSnapshot,
               latestResult: result,
-            })
-            setActivePanel(result.report?.markdown ? 'report' : 'analysis')
+            }).catch(() => {})
             assistantContent = result.response || result.clarification?.question || t('returnedResult')
-            replaceMessage(assistantMessageId, (message) => ({
+            let nextPresentation: AssistantPresentation | null = currentPresentationRef.current
+            if (nextPresentation) {
+              if (!nextPresentation.summaryText) {
+                nextPresentation = reducePresentationEvent(nextPresentation, {
+                  type: 'summary_replace',
+                  summaryText: assistantContent,
+                })
+              }
+              nextPresentation = reducePresentationEvent(nextPresentation, {
+                type: 'presentation_complete',
+                completedAt: result.completedAt || new Date().toISOString(),
+              })
+              currentPresentationRef.current = nextPresentation
+            }
+            replaceMessageForConversation(activeConversationId, assistantMessageId, (message) => ({
               ...message,
               content: assistantContent,
               status: 'done',
               debugDetails,
+              presentation: currentPresentationRef.current ?? message.presentation,
             }))
             shouldBumpConversationActivity = true
           }
@@ -2272,54 +3080,74 @@ export function AIConsole() {
           if (payload.type === 'error') {
             const nextError = typeof payload.error === 'string' ? payload.error : t('requestFailed')
             assistantContent = nextError
-            setErrorMessage(nextError)
-            replaceMessage(assistantMessageId, (message) => ({
+            if (activeConversationId === conversationIdRef.current) {
+              setErrorMessage(nextError)
+            }
+            replaceMessageForConversation(activeConversationId, assistantMessageId, (message) => ({
               ...message,
               content: assistantContent,
               status: 'error',
+              presentation: currentPresentationRef.current ?? message.presentation,
             }))
             shouldBumpConversationActivity = true
           }
         }
       }
 
-      replaceMessage(assistantMessageId, (message) => ({
-        ...message,
-        content: message.content || assistantSeed,
-        status: message.status === 'error' ? 'error' : 'done',
-      }))
-      if (assistantContent !== assistantSeed || receivedResult) {
-        shouldBumpConversationActivity = true
+      if (abortController.signal.aborted) {
+        await finalizeAbortedTurn()
+      } else {
+        replaceMessageForConversation(activeConversationId, assistantMessageId, (message) => ({
+          ...message,
+          content: message.content || assistantSeed,
+          status: message.status === 'error' ? 'error' : 'done',
+          presentation: currentPresentationRef.current ?? message.presentation,
+        }))
+        if (assistantContent !== assistantSeed || receivedResult) {
+          shouldBumpConversationActivity = true
+        }
       }
     } catch (error) {
-      const nextError = error instanceof Error ? error.message : t('requestFailed')
-
-      if ((receivedResult || assistantContent !== assistantSeed) && nextError === 'Failed to fetch') {
-        replaceMessage(assistantMessageId, (message) => ({
-          ...message,
-          status: message.status === 'error' ? 'error' : 'done',
-        }))
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        await finalizeAbortedTurn()
       } else {
-        setErrorMessage(nextError)
-        replaceMessage(assistantMessageId, (message) => ({
-          ...message,
-          content: nextError,
-          status: 'error',
-        }))
-        shouldBumpConversationActivity = Boolean(activeConversationId)
+        const nextError = error instanceof Error ? error.message : t('requestFailed')
+
+        if ((receivedResult || assistantContent !== assistantSeed) && nextError === 'Failed to fetch') {
+          replaceMessageForConversation(activeConversationId, assistantMessageId, (message) => ({
+            ...message,
+            status: message.status === 'error' ? 'error' : 'done',
+            presentation: currentPresentationRef.current ?? message.presentation,
+          }))
+        } else {
+          if (activeConversationId === conversationIdRef.current) {
+            setErrorMessage(nextError)
+          }
+          replaceMessageForConversation(activeConversationId, assistantMessageId, (message) => ({
+            ...message,
+            content: nextError,
+            status: 'error',
+            presentation: currentPresentationRef.current ?? message.presentation,
+          }))
+          shouldBumpConversationActivity = Boolean(activeConversationId)
+        }
       }
     } finally {
-      if (shouldBumpConversationActivity) {
+      submittingRef.current = false
+      setIsStreaming(false)
+      if (shouldBumpConversationActivity || abortController.signal.aborted) {
         markConversationActivity(activeConversationId)
       }
-      setIsSending(false)
+      const finalStatus = abortController.signal.aborted ? 'aborted' : 'completed'
+      updateStreamSessionStatus(activeConversationId, finalStatus)
+      setTimeout(() => removeStreamSession(activeConversationId), 2000)
     }
   }
 
   return (
     <div
       data-testid="console-layout-grid"
-      className="grid min-h-[calc(100vh-5.5rem)] gap-4 xl:h-[calc(100vh-5.5rem)] xl:min-h-0 xl:grid-cols-[300px_minmax(0,1.7fr)_460px] xl:overflow-hidden 2xl:grid-cols-[320px_minmax(0,1.9fr)_500px]"
+      className="grid min-h-[calc(100vh-5.5rem)] gap-4 xl:h-full xl:min-h-0 xl:grid-cols-[260px_minmax(0,2.2fr)_420px] xl:overflow-hidden 2xl:grid-cols-[280px_minmax(0,2.4fr)_460px]"
     >
       <aside
         data-testid="console-history-panel"
@@ -2335,7 +3163,6 @@ export function AIConsole() {
             type="button"
             className="mt-4 w-full rounded-full bg-cyan-300 text-slate-950 hover:bg-cyan-200"
             onClick={handleNewConversation}
-            disabled={isSending}
           >
             <MessageSquarePlus className="h-4 w-4" />
             {t('newConversation')}
@@ -2422,6 +3249,12 @@ export function AIConsole() {
                             <div className="mt-2 flex items-center gap-2 text-xs text-slate-500">
                               <Clock3 className="h-3.5 w-3.5" />
                               <span>{formatDate(conversationTimestamp, locale)}</span>
+                              {streamingSessions.get(conversation.id)?.status === 'streaming' && (
+                                <span className="flex items-center gap-1 text-cyan-600 dark:text-cyan-400">
+                                  <span className="inline-flex h-2 w-2 rounded-full bg-cyan-500 animate-pulse" />
+                                  {t('streamingInProgress')}
+                                </span>
+                              )}
                             </div>
                           )}
                           {preview?.content && (
@@ -2453,7 +3286,7 @@ export function AIConsole() {
 
       <section
         data-testid="console-chat-panel"
-        className="relative overflow-hidden rounded-[32px] border border-border/70 bg-card/85 shadow-[0_40px_120px_-50px_rgba(34,211,238,0.2)] backdrop-blur-xl xl:min-h-0 dark:border-white/10 dark:bg-slate-950/70 dark:shadow-[0_40px_120px_-50px_rgba(34,211,238,0.45)]"
+        className="relative flex h-full flex-col overflow-hidden rounded-[32px] border border-border/70 bg-card/85 shadow-[0_40px_120px_-50px_rgba(34,211,238,0.2)] backdrop-blur-xl xl:min-h-0 dark:border-white/10 dark:bg-slate-950/70 dark:shadow-[0_40px_120px_-50px_rgba(34,211,238,0.45)]"
       >
         <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(34,211,238,0.18),transparent_30%),radial-gradient(circle_at_bottom_right,rgba(249,115,22,0.12),transparent_30%)] dark:bg-[radial-gradient(circle_at_top_left,rgba(34,211,238,0.22),transparent_30%),radial-gradient(circle_at_bottom_right,rgba(249,115,22,0.18),transparent_30%)]" />
         <div className="relative flex h-full min-h-[320px] flex-col xl:min-h-0">
@@ -2503,7 +3336,7 @@ export function AIConsole() {
                 </div>
               )}
 
-              {messages.map((message) => (
+              {messages.map((message, msgIdx) => (
                 <div
                   key={message.id}
                   className={cn('flex gap-3', message.role === 'user' ? 'justify-end' : 'justify-start')}
@@ -2527,13 +3360,77 @@ export function AIConsole() {
                       <span>{message.role === 'user' ? t('you') : t('structureClawAi')}</span>
                       <span className="text-slate-500">{formatDate(message.timestamp, locale)}</span>
                     </div>
-                    <div className="whitespace-pre-wrap text-sm leading-7">
-                      {message.content}
-                      {message.status === 'streaming' && (
-                        <span className="ml-2 inline-flex h-2 w-2 rounded-full bg-cyan-300 shadow-[0_0_18px_rgba(103,232,249,0.9)]" />
-                      )}
-                    </div>
-                    {message.role === 'assistant' && message.debugDetails && (
+                    {message.presentation && (
+                      <MessagePresentationView
+                        presentation={message.presentation}
+                        t={t}
+                        resolveSkillName={(skillId: string) => {
+                          const skill = availableSkills.find((s) => s.id === skillId)
+                          if (!skill) return skillId
+                          return locale === 'zh' ? (skill.name.zh || skill.name.en || skillId) : (skill.name.en || skill.name.zh || skillId)
+                        }}
+                      />
+                    )}
+                    {!message.presentation && message.content && (
+                      message.role === 'assistant'
+                        ? <MarkdownBody compact content={message.content} />
+                        : <div className="whitespace-pre-wrap text-sm leading-7">{message.content}</div>
+                    )}
+                    {message.status === 'streaming' && !message.presentation && (
+                      <div className="flex items-center gap-2 mt-2" role="status">
+                        <svg className="h-3.5 w-3.5 shrink-0 animate-spin text-cyan-600 dark:text-cyan-300" viewBox="0 0 24 24" fill="none">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                        </svg>
+                        <span className="text-sm text-muted-foreground">{t('presentationPlanning')}</span>
+                      </div>
+                    )}
+                    {message.status === 'aborted' && (
+                      <span className="ml-2 inline-flex items-center gap-1 text-xs text-rose-500 dark:text-rose-400">
+                        <Square className="h-2.5 w-2.5" />
+                        {t('streamAborted')}
+                      </span>
+                    )}
+                    {message.status === 'error' && (
+                      <div className="mt-2 flex items-center gap-2">
+                        <span className="text-xs text-rose-500 dark:text-rose-400">{t('streamAborted')}</span>
+                        <button
+                          type="button"
+                          className="inline-flex items-center gap-1 rounded-full border border-rose-300/40 bg-rose-300/10 px-2.5 py-1 text-[11px] text-rose-800 hover:bg-rose-300/20 dark:text-rose-200"
+                          onClick={() => {
+                            const prevUserMsg = msgIdx > 0 ? messages[msgIdx - 1] : null
+                            if (prevUserMsg?.role === 'user') {
+                              setInput(prevUserMsg.content)
+                              composerTextareaRef.current?.focus()
+                            }
+                          }}
+                        >
+                          <RefreshCw className="h-3 w-3" />
+                          {t('retrySend')}
+                        </button>
+                      </div>
+                    )}
+                    {message.role === 'assistant' && extractPdfUrl(message.content) && (
+                      <div className="group/pdf mt-3 overflow-hidden rounded-xl border border-border/70 dark:border-white/10">
+                        <div className="flex items-center justify-between border-b border-border/50 px-3 py-1.5 dark:border-white/10">
+                          <span className="text-xs font-medium text-muted-foreground">PDF</span>
+                          <button
+                            type="button"
+                            onClick={() => window.open(extractPdfUrl(message.content)!, '_blank')}
+                            className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                          >
+                            <Maximize2 className="h-3 w-3" />
+                            {locale === 'zh' ? '全屏查看' : 'Fullscreen'}
+                          </button>
+                        </div>
+                        <iframe
+                          src={extractPdfUrl(message.content)!}
+                          className="h-[480px] w-full border-0"
+                          title="PDF Preview"
+                        />
+                      </div>
+                    )}
+                    {message.role === 'assistant' && message.debugDetails && !message.presentation && (
                       <details className="mt-3 rounded-2xl border border-border/70 bg-background/60 px-3 py-2 dark:border-white/10 dark:bg-slate-950/40">
                         <summary className="cursor-pointer text-xs font-medium uppercase tracking-[0.16em] text-muted-foreground">
                           {t('promptThinkingToggle')}
@@ -2681,10 +3578,10 @@ export function AIConsole() {
             </div>
           </div>
 
-          <div data-testid="console-composer" className="border-t border-border/70 px-4 py-3 dark:border-white/10">
+          <div data-testid="console-composer" className="border-t border-border/70 px-4 py-3 dark:border-white/10 overflow-y-auto max-h-[40vh]">
             <div className="w-full space-y-3">
               {errorMessage && (
-                <div className="rounded-2xl border border-rose-400/20 bg-rose-400/10 px-4 py-3 text-sm text-rose-100">
+                <div role="alert" className="rounded-2xl border border-rose-400/20 bg-rose-400/10 px-4 py-3 text-sm text-rose-100">
                   {errorMessage}
                 </div>
               )}
@@ -2741,10 +3638,17 @@ export function AIConsole() {
                 </div>
 
                 <Textarea
+                  ref={composerTextareaRef}
                   className="min-h-[96px] resize-none border-0 bg-transparent px-3 py-2.5 text-base text-foreground placeholder:text-muted-foreground focus-visible:ring-0 focus-visible:ring-offset-0"
                   placeholder={t('composerPlaceholder')}
                   value={input}
                   onChange={(event) => setInput(event.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                      e.preventDefault()
+                      handleSubmit()
+                    }
+                  }}
                 />
                 <Separator className="bg-border dark:bg-white/10" />
 
@@ -2754,28 +3658,82 @@ export function AIConsole() {
                       type="button"
                       className="rounded-full border border-border bg-background/70 px-3 py-1.5 text-sm text-muted-foreground transition hover:border-cyan-300/30 hover:text-foreground dark:border-white/10 dark:bg-white/5 dark:hover:text-white"
                       onClick={() => setContextOpen((current) => !current)}
+                      aria-expanded={contextOpen}
+                      aria-controls={contextOpen ? 'context-section' : undefined}
                     >
                       {contextOpen ? t('collapseContext') : t('expandContext')}
                     </button>
                     <Badge className="border-border/70 bg-background/70 text-muted-foreground dark:border-white/10 dark:bg-white/5" variant="outline">
                       {t('conversationIdShort')} {conversationId ? conversationId.slice(0, 8) : t('notCreated')}
                     </Badge>
+                    {allEngines.length > 0 && (
+                      <div className="flex items-center gap-1.5">
+                        {allEngines.map((engine) => {
+                          const probe = probeResults[engine.id]
+                          const dotColor = probe
+                            ? (probe.loading ? 'bg-amber-400 dark:bg-amber-300' : (probe.passed ? 'bg-emerald-500 dark:bg-emerald-400' : 'bg-red-400 dark:bg-red-500'))
+                            : 'bg-gray-400 dark:bg-gray-500'
+                          return (
+                            <span
+                              key={engine.id}
+                              className="inline-flex items-center gap-1 text-[11px] text-muted-foreground"
+                              title={probe ? undefined : (engine.unavailableReason || (engine.available ? t('engineStatusAvailable') : t('engineStatusUnavailable')))}
+                            >
+                              <span className={`inline-block h-1.5 w-1.5 rounded-full ${dotColor}`} />
+                              <span className={probe ? (probe.passed ? '' : 'opacity-50') : 'opacity-60'}>{engine.name}</span>
+                            </span>
+                          )
+                        })}
+                        <div className="relative ml-1">
+                          <button
+                            ref={probeButtonRef}
+                            type="button"
+                            aria-haspopup="dialog"
+                            aria-expanded={probePopupOpen}
+                            className="inline-flex items-center gap-1 rounded-full border border-border/70 bg-background/70 px-2 py-0.5 text-[11px] text-muted-foreground transition hover:border-cyan-300/30 hover:text-foreground disabled:opacity-50 dark:border-white/10 dark:bg-white/5"
+                            onClick={() => {
+                              const hasResults = Object.keys(probeResults).length > 0
+                              if (hasResults) {
+                                setProbePopupOpen((v) => !v)
+                              } else {
+                                probeAllEngines()
+                              }
+                            }}
+                            disabled={probeAllRunning}
+                          >
+                            {probeAllRunning ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+                            {t('engineProbeButton')}
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
-                    <Button
-                      type="button"
-                      className="rounded-full bg-cyan-300 px-5 text-slate-950 hover:bg-cyan-200"
-                      onClick={() => handleSubmit()}
-                      disabled={isSending || !input.trim()}
-                    >
-                      {isSending ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowUp className="h-4 w-4" />}
-                      {t('sendMessage')}
-                    </Button>
+                    {streamingSessions.get(conversationId)?.status === 'streaming' ? (
+                      <Button
+                        type="button"
+                        className="rounded-full bg-rose-500 px-5 text-white hover:bg-rose-400"
+                        onClick={() => stopStream()}
+                      >
+                        <Square className="h-4 w-4" />
+                        {t('stopStreaming')}
+                      </Button>
+                    ) : (
+                      <Button
+                        type="button"
+                        className="rounded-full bg-cyan-300 px-5 text-slate-950 hover:bg-cyan-200"
+                        onClick={() => handleSubmit()}
+                        disabled={!input.trim() || submittingRef.current}
+                      >
+                        <ArrowUp className="h-4 w-4" />
+                        {t('sendMessage')}
+                      </Button>
+                    )}
                   </div>
                 </div>
 
                 {contextOpen && (
-                  <div className="mt-3 rounded-[24px] border border-border/70 bg-background/70 p-4 dark:border-white/10 dark:bg-white/5">
+                  <div id="context-section" role="region" aria-label={t('contextPanelLabel')} className="mt-3 max-h-[50vh] overflow-y-auto rounded-[24px] border border-border/70 bg-background/70 p-4 dark:border-white/10 dark:bg-white/5">
                     <div className="space-y-2">
                       <div>
                         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -2847,6 +3805,83 @@ export function AIConsole() {
         snapshot={activeVisualizationSnapshot}
         t={t}
       />
+      {probePopupOpen && Object.keys(probeResults).length > 0 && probeButtonRef.current && typeof window !== 'undefined' && createPortal(
+        <>
+          <div
+            className="fixed inset-0 z-[70]"
+            onClick={() => setProbePopupOpen(false)}
+            onKeyDown={(e) => { if (e.key === 'Escape') setProbePopupOpen(false) }}
+          />
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label={t('probeResultsDialogTitle')}
+            className="fixed z-[71] w-80 rounded-xl border border-border/70 bg-card p-4 shadow-xl dark:border-white/10 dark:bg-slate-950"
+            style={{
+              bottom: window.innerHeight - probeButtonRef.current.getBoundingClientRect().top + 8,
+              left: Math.max(0, Math.min(probeButtonRef.current.getBoundingClientRect().left, window.innerWidth - 336)),
+            }}
+            onKeyDown={(e) => { if (e.key === 'Escape') setProbePopupOpen(false) }}
+          >
+            <div className="mb-3 flex items-center justify-between">
+              <span className="text-xs font-semibold text-foreground">{t('engineProbeButton')}</span>
+              <button
+                type="button"
+                className="text-[11px] text-muted-foreground hover:text-foreground"
+                onClick={() => setProbePopupOpen(false)}
+                aria-label={t('closeLabel')}
+              >
+                ✕
+              </button>
+            </div>
+            <div className="space-y-2.5">
+              {allEngines.map((engine) => {
+                const probe = probeResults[engine.id]
+                if (!probe) return null
+                return (
+                  <div key={engine.id} className="rounded-lg border border-border/50 bg-background/60 p-2.5 dark:border-white/5 dark:bg-white/5">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        {probe.loading ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin text-amber-500" />
+                        ) : (
+                          <span className={`inline-block h-2 w-2 rounded-full ${probe.passed ? 'bg-emerald-500' : 'bg-red-400'}`} />
+                        )}
+                        <span className="text-xs font-medium text-foreground">{engine.name}</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[11px] text-muted-foreground">
+                          {probe.loading ? t('engineProbeRunning')
+                            : probe.passed ? t('engineProbePassed')
+                            : t('engineProbeFailed')}
+                        </span>
+                        {!probe.loading && !probe.passed && (
+                          <button
+                            type="button"
+                            className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-cyan-700 hover:bg-cyan-50 dark:text-cyan-300 dark:hover:bg-cyan-900/30"
+                            onClick={() => probeSingleEngine(engine.id)}
+                            aria-label={`${t('retryLabel')} ${engine.name}`}
+                          >
+                            <RefreshCw className="h-2.5 w-2.5" />
+                            {t('retryLabel')}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    {probe.durationMs != null && !probe.loading && (
+                      <div className="mt-1 text-[11px] text-muted-foreground">{t('engineProbeDuration')}: {probe.durationMs}ms</div>
+                    )}
+                    {probe.error && !probe.loading && (
+                      <div className="mt-1 text-[11px] leading-4 text-red-600 dark:text-red-400" role="alert">{probe.error}</div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        </>,
+        document.body,
+      )}
     </div>
   )
 }

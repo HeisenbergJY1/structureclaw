@@ -8,7 +8,7 @@ from typing import List, Dict, Any, Optional
 import logging
 
 from registry import AnalysisEngineRegistry
-from structure_protocol.structure_model_v1 import StructureModelV1
+from structure_protocol.structure_model_v2 import StructureModelV2
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -36,7 +36,7 @@ app.add_middleware(
 
 class AnalysisRequest(BaseModel):
     type: str  # static, dynamic, seismic, nonlinear
-    model: StructureModelV1
+    model: StructureModelV2
     parameters: Dict[str, Any]
     engine_id: Optional[str] = Field(default=None, alias="engineId")
 
@@ -97,6 +97,12 @@ async def get_analysis_engine(engine_id: str):
 async def check_analysis_engine(engine_id: str):
     """检查分析引擎可用性"""
     return engine_registry.check_engine(engine_id)
+
+
+@app.post("/engines/{engine_id}/probe")
+async def probe_analysis_engine(engine_id: str):
+    """运行小型算例验证分析引擎能否正常工作"""
+    return engine_registry.probe_engine(engine_id)
 
 
 @app.post("/analyze")
