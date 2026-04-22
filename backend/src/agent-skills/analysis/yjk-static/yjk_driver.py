@@ -266,25 +266,35 @@ def _run(model_path: str, work_dir: str, yjks_root: str) -> int:
 
     print("[yjk_driver] Phase 5: preprocessing done, launching calculation in background", file=sys.stderr, flush=True)
 
-    # Fire-and-forget: start the heavy calculation in a daemon thread so
-    # the driver can return immediately.  The YJK GUI stays open and the
-    # user can observe progress there.
+    # Fire-and-forget: dispatch the heavy calculation command to YJK, then
+    # return immediately.  RunCmd is synchronous (blocks until YJK finishes),
+    # but the YJK GUI is an independent process — once the command is
+    # dispatched via the YJKAPI COM/IPC channel, the calculation continues
+    # even after this driver process exits.
+    #
+    # We use a non-daemon thread so Python won't kill it during shutdown.
+    # The thread calls RunCmd which blocks inside the YJKAPI DLL; once the
+    # IPC message is sent to YJK, the actual computation runs in yjks.exe.
+    # We join with a generous timeout to ensure the IPC dispatch completes,
+    # then emit our result and exit.  The thread may still be alive (blocked
+    # waiting for YJK to finish), but os._exit() will terminate cleanly.
     import threading
+
+    dispatch_ok = threading.Event()
 
     def _background_calc() -> None:
         try:
+            dispatch_ok.set()  # signal that we've entered the function
             _run_cmd("yjkdesign_dsncalculating_all")
             _run_cmd("SetCurrentLabel", "IDDSN_DSP")
             print("[yjk_driver] background calculation finished", file=sys.stderr, flush=True)
         except Exception as exc:
             print(f"[yjk_driver] background calculation error: {exc}", file=sys.stderr, flush=True)
 
-    calc_thread = threading.Thread(target=_background_calc, daemon=True)
+    calc_thread = threading.Thread(target=_background_calc, daemon=False)
     calc_thread.start()
-    # Give the thread a moment to issue the RunCmd call to YJK before we exit.
-    # The YJK GUI process is independent — once the command is dispatched,
-    # calculation continues even after this driver process exits.
-    calc_thread.join(timeout=5)
+    # Wait for the thread to start and dispatch the command to YJK.
+    dispatch_ok.wait(timeout=10)
 
     # -- Build final output (return immediately) ------------------------
     warnings: list[str] = []
@@ -309,7 +319,11 @@ def _run(model_path: str, work_dir: str, yjks_root: str) -> int:
 
     _emit_json(output)
     print("[yjk_driver] done — calculation running in YJK", file=sys.stderr, flush=True)
-    return 0
+    # Force-exit: the non-daemon calc_thread is blocked inside RunCmd
+    # waiting for YJK to finish.  We don't want to wait — os._exit()
+    # terminates immediately without joining threads.  The YJK GUI
+    # process is independent and continues the calculation.
+    os._exit(0)
 
 
 if __name__ == "__main__":
