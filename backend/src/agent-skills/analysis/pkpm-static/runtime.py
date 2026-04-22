@@ -14,6 +14,7 @@ PKPM_WORK_DIR : str, optional
 """
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import tempfile
@@ -23,6 +24,8 @@ from threading import Lock
 from typing import Any, Dict
 
 from contracts import EngineNotAvailableError
+
+logger = logging.getLogger(__name__)
 
 # Thread lock to serialize DirectorySet.conf write + execution within this process.
 # For multi-process deployments, use an external lock mechanism (e.g., file lock).
@@ -190,8 +193,6 @@ def _extract_results(jws_path: Path, material_family: str = "steel") -> Dict[str
         max_shear_force = 0.0
         max_posi_moment = 0.0
         max_nega_moment = 0.0
-        max_shear_compression_ratio = 0.0
-        max_axial_compression_ratio = 0.0
         all_node_disp_x: list[float] = []
         all_node_disp_y: list[float] = []
         all_node_disp_z: list[float] = []
@@ -239,7 +240,6 @@ def _extract_results(jws_path: Path, material_family: str = "steel") -> Dict[str
                 shear = _safe_float(b.GetShearingforce())
                 posi = b.GetPosiMoment()
                 nega = b.GetNegaMoment()
-                scr = _safe_float(b.GetShearCompressionRatio())
 
                 # Prefer GetForce() values if design methods return 0
                 if beam_max_v > 0 and abs(shear) < 0.001:
@@ -253,25 +253,12 @@ def _extract_results(jws_path: Path, material_family: str = "steel") -> Dict[str
                 max_shear_force = max(max_shear_force, abs(shear))
                 max_posi_moment = max(max_posi_moment, _max_from_list([abs(v) for v in posi]))
                 max_nega_moment = max(max_nega_moment, _max_from_list([abs(v) for v in nega]))
-                max_shear_compression_ratio = max(max_shear_compression_ratio, scr)
-
-                # Beam utilization ratio (GetCalcMax1 works for both steel and concrete)
-                beam_util = 0.0
-                try:
-                    beam_util = _max_from_list([abs(v) for v in b.GetCalcMax1()])
-                except Exception:
-                    pass
-                if beam_util < 0.001:
-                    beam_util = scr
-
                 beam_results.append({
                     "floor": floor_idx,
                     "pmid": pmid,
                     "max_shear_force_kn": round(shear, 2),
-                    "shear_compression_ratio": round(scr, 4),
                     "positive_moments_kNm": [round(v, 2) for v in posi],
                     "negative_moments_kNm": [round(v, 2) for v in nega],
-                    "utilization_ratio": round(beam_util, 4),
                 })
 
             for c in columns:
@@ -305,28 +292,12 @@ def _extract_results(jws_path: Path, material_family: str = "steel") -> Dict[str
                             if len(vals) >= 5: entry["My"] = max(entry["My"], abs(vals[4]))
                             if len(vals) >= 6: entry["Mz"] = max(entry["Mz"], abs(vals[5]))
 
-                axial_ratios = c.GetAxialCompresRatio()
-                acr = _max_from_list([abs(v) for v in axial_ratios])
-                max_axial_compression_ratio = max(max_axial_compression_ratio, acr)
-
-                # Column utilization ratio (GetCalcMax1 for both steel/concrete)
-                col_util = 0.0
-                try:
-                    col_util = _max_from_list([abs(v) for v in c.GetCalcMax1()])
-                except Exception:
-                    pass
-                if col_util < 0.001:
-                    col_util = acr
-
                 column_results.append({
                     "floor": floor_idx,
                     "pmid": pmid,
-                    "axial_compression_ratio": [round(v, 4) for v in axial_ratios],
-                    "slenderness_ratio": [round(v, 2) for v in c.GetSlenderRatio()],
                     "max_axial_force_kn": round(col_max_n, 2),
                     "max_shear_force_kn": round(col_max_v, 2),
                     "max_moment_kNm": round(col_max_m, 2),
-                    "utilization_ratio": round(col_util, 4),
                 })
 
             floor_idx += 1
@@ -432,8 +403,6 @@ def _extract_results(jws_path: Path, material_family: str = "steel") -> Dict[str
                 "max_displacement_mm": round(max_displacement, 4),
                 "max_shear_force_kn": round(max_shear_force, 2),
                 "max_bending_moment_kNm": round(max(max_posi_moment, max_nega_moment), 2),
-                "max_shear_compression_ratio": round(max_shear_compression_ratio, 4),
-                "max_axial_compression_ratio": round(max_axial_compression_ratio, 4),
             },
             "beams": beam_results,
             "columns": column_results,
@@ -545,7 +514,7 @@ def run_analysis(model: Dict[str, Any], parameters: Dict[str, Any]) -> Dict[str,
             v2_node_floor[v2_id] = 0  # base
             continue
         for i, top_z in enumerate(story_tops):
-            if abs(z - top_z) < 0.01:
+            if abs(z - top_z) < 0.1:
                 v2_node_floor[v2_id] = i + 1
                 break
 
@@ -561,11 +530,10 @@ def run_analysis(model: Dict[str, Any], parameters: Dict[str, Any]) -> Dict[str,
     for nd in node_disps:
         pmid = nd.get("pmid", -1)
         floor = nd.get("floor", 0)
-        # Try to remap to V2 node ID
+        # Only include displacement when V2 node mapping succeeds
         v2_id = pm_floor_to_v2.get((pmid, floor))
-        node_key = v2_id if v2_id else str(pmid)
-        if node_key:
-            displacements[node_key] = {
+        if v2_id:
+            displacements[v2_id] = {
                 "ux": nd.get("max_disp_x_mm", 0.0),
                 "uy": nd.get("max_disp_y_mm", 0.0),
                 "uz": nd.get("max_disp_z_mm", 0.0),
@@ -591,6 +559,80 @@ def run_analysis(model: Dict[str, Any], parameters: Dict[str, Any]) -> Dict[str,
         pkpm_floor = max(start_floor, end_floor)
         if pkpm_floor > 0:
             pm_floor_elem_to_v2[(pmid, pkpm_floor)] = v2_eid
+
+    # Supplement mapping from PKPM design data (beams/columns carry pmid + floor)
+    if len(pm_floor_elem_to_v2) < len(elem_map_raw):
+        # Build pmid → [v2_eid, ...] index for fast lookup
+        pmid_to_v2: Dict[int, list[str]] = {}
+        for v2_eid, info in elem_map_raw.items():
+            pmid_to_v2.setdefault(info["pmid"], []).append(v2_eid)
+        for item in beams + columns:
+            item_pmid = item.get("pmid", -1)
+            item_floor = item.get("floor", 0)
+            if item_pmid < 0 or item_floor <= 0:
+                continue
+            key = (item_pmid, item_floor)
+            if key not in pm_floor_elem_to_v2:
+                for candidate in pmid_to_v2.get(item_pmid, []):
+                    c_data = v2_elem_by_id.get(candidate)
+                    if not c_data:
+                        continue
+                    c_nodes = c_data.get("nodes", [])
+                    c_floor = max(
+                        (v2_node_floor.get(n, 0) for n in c_nodes), default=0
+                    )
+                    if c_floor == item_floor:
+                        pm_floor_elem_to_v2[key] = candidate
+                        break
+
+    # Fallback: if extracted pmids don't overlap with converter pmids,
+    # PKPM renumbered elements after analysis. Match by floor+type+sequential order.
+    _ext_pmids = {item.get("pmid") for item in beams + columns if item.get("pmid")}
+    _map_pmids = {info["pmid"] for info in elem_map_raw.values()}
+    if len(_ext_pmids & _map_pmids) == 0 and (beams or columns):
+        from collections import defaultdict
+        # Group ALL elem_map entries by (floor, type)
+        elem_by_floor_type: Dict[tuple[int, str], list[str]] = defaultdict(list)
+        for v2_eid, info in elem_map_raw.items():
+            elem_data = v2_elem_by_id.get(v2_eid)
+            if not elem_data:
+                continue
+            node_ids = elem_data.get("nodes", [])
+            start_floor = v2_node_floor.get(node_ids[0], 0) if node_ids else 0
+            end_floor = v2_node_floor.get(node_ids[-1], 0) if node_ids else 0
+            pkpm_floor = max(start_floor, end_floor)
+            etype = info.get("type", "beam")
+            if pkpm_floor > 0:
+                elem_by_floor_type[(pkpm_floor, etype)].append(v2_eid)
+        for k in elem_by_floor_type:
+            elem_by_floor_type[k].sort()
+
+        # Group extracted elements by (floor, type) sorted by pmid
+        ext_by_floor_type: Dict[tuple[int, str], list[dict]] = defaultdict(list)
+        for item in beams:
+            ext_by_floor_type[(item.get("floor", 0), "beam")].append(item)
+        for item in columns:
+            ext_by_floor_type[(item.get("floor", 0), "col")].append(item)
+        for k in ext_by_floor_type:
+            ext_by_floor_type[k].sort(key=lambda x: x.get("pmid", 0))
+
+        # Zip: nth extracted element on (floor, type) → nth elem_map entry
+        floor_type_matched = 0
+        for ft_key, ext_items in ext_by_floor_type.items():
+            map_entries = elem_by_floor_type.get(ft_key, [])
+            for i, item in enumerate(ext_items):
+                if i < len(map_entries):
+                    ext_pmid = item.get("pmid", -1)
+                    ext_floor = item.get("floor", 0)
+                    if ext_pmid > 0 and ext_floor > 0:
+                        new_key = (ext_pmid, ext_floor)
+                        if new_key not in pm_floor_elem_to_v2:
+                            pm_floor_elem_to_v2[new_key] = map_entries[i]
+                            floor_type_matched += 1
+        if floor_type_matched > 0:
+            logger.info(
+                "Floor+type sequential matching: %d elements mapped", floor_type_matched,
+            )
 
     # forces: { elementId: { N, V, M, Vy, Vz, My, Mz, T } }
     forces: Dict[str, Dict[str, float]] = {}
@@ -622,15 +664,16 @@ def run_analysis(model: Dict[str, Any], parameters: Dict[str, Any]) -> Dict[str,
             "T": f["T"],
         }
 
-    # ---- Build member utilization map (Phase 5) ----
-    member_utilization: Dict[str, float] = {}
-    for item in beams + columns:
-        pmid = item.get("pmid", -1)
-        floor = item.get("floor", 0)
-        v2_eid = pm_floor_elem_to_v2.get((pmid, floor))
-        util = item.get("utilization_ratio", 0.0)
-        if v2_eid and util > 0:
-            member_utilization[v2_eid] = round(util, 4)
+    logger.debug(
+        "Phase 4 mapping: %d/%d nodes mapped to floor, "
+        "%d/%d elem mappings, %d forces, %d displacements",
+        sum(1 for f in v2_node_floor.values() if f >= 0),
+        len(v2_node_z),
+        len(pm_floor_elem_to_v2),
+        len(elem_map_raw),
+        len(forces),
+        len(displacements),
+    )
 
     # ---- Build caseResults + envelopeTables (Phase 3) ----
     case_node_disps = extracted.get("case_node_disps", {})
@@ -770,10 +813,5 @@ def run_analysis(model: Dict[str, Any], parameters: Dict[str, Any]) -> Dict[str,
         },
         "warnings": warnings,
     }
-
-    # Add utilization data under correct key for frontend adapter
-    if member_utilization:
-        check_key = "steelCheck" if material_family == "steel" else "codeCheck"
-        result_dict[check_key] = {"memberUtilization": member_utilization}
 
     return result_dict
